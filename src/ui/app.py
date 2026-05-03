@@ -4,7 +4,10 @@ Main application window and top-level wiring.
 
 from __future__ import annotations
 
+import getpass
 import queue
+import shutil
+import subprocess
 import sys
 import threading
 from typing import Callable, Dict, Optional
@@ -12,7 +15,7 @@ from typing import Callable, Dict, Optional
 import customtkinter as ctk
 
 from core.config import ConfigManager
-from core.profile import ProfileManager
+from core.profile import ProfileManager, get_delete_permission_issue
 from core.scheduler import SyncScheduler
 from core.syncer import SyncEngine, SyncEvent, SyncStatus
 from core.watcher import WatcherManager
@@ -180,12 +183,22 @@ class QueekSyncApp:
     # Sync operations (called from UI)
     # ==================================================================
 
-    def start_sync(self, profile_id: str) -> None:
+    def start_sync(self, profile_id: str, interactive: bool = True) -> None:
         profile = self.profile_mgr.get(profile_id)
         if profile is None:
             return
         if profile_id in self._engines and self._engines[profile_id].is_running():
             return  # already running
+
+        validation_error = self._validate_sync_permissions(profile)
+        if validation_error:
+            if interactive and self._attempt_elevated_permission_fix(profile, validation_error):
+                validation_error = self._validate_sync_permissions(profile)
+            self._report_blocked_sync(profile_id, profile.name, validation_error, interactive)
+            if validation_error:
+                profile.last_sync_status = "error"
+                self.profile_mgr.save(profile)
+                return
 
         def _cb(event: SyncEvent) -> None:
             self._event_queue.put(event)
@@ -219,11 +232,99 @@ class QueekSyncApp:
     # ==================================================================
 
     def _schedule_trigger(self, profile_id: str) -> None:
-        self.start_sync(profile_id)
+        self.start_sync(profile_id, interactive=False)
 
     def _watch_trigger(self, profile_id: str) -> None:
         if not self.is_syncing(profile_id):
-            self.start_sync(profile_id)
+            self.start_sync(profile_id, interactive=False)
+
+    def _validate_sync_permissions(self, profile) -> Optional[str]:
+        return get_delete_permission_issue(profile)
+
+    def _attempt_elevated_permission_fix(self, profile, message: str) -> bool:
+        if sys.platform != "linux" or profile.destination.type != "local":
+            return False
+
+        from tkinter import messagebox
+
+        dst_path = profile.destination.path.strip()
+        if not dst_path:
+            return False
+
+        proceed = messagebox.askyesno(
+            f"Admin Access Needed: {profile.name}",
+            message
+            + "\n\n"
+            + "QueekSync can ask for administrator approval now, repair this destination folder, and then continue the sync automatically.\n\n"
+            + "Proceed?",
+            parent=self.root,
+        )
+        if not proceed:
+            return False
+
+        success, error = self._run_elevated_permission_fix(dst_path)
+        if success:
+            return True
+
+        messagebox.showerror(
+            "Permission Repair Failed",
+            "QueekSync could not get administrator approval to repair the destination folder.\n\n"
+            + error,
+            parent=self.root,
+        )
+        return False
+
+    def _run_elevated_permission_fix(self, path: str) -> tuple[bool, str]:
+        username = getpass.getuser()
+        fix_script = (
+            "import subprocess, sys; "
+            "username, target = sys.argv[1], sys.argv[2]; "
+            "subprocess.run(['chown', '-R', f'{username}:{username}', target], check=True); "
+            "subprocess.run(['chmod', '-R', 'u+rwX', target], check=True)"
+        )
+
+        cached_sudo = ["sudo", "-n", sys.executable, "-c", fix_script, username, path]
+        try:
+            subprocess.run(cached_sudo, check=True, capture_output=True, text=True)
+            return True, ""
+        except FileNotFoundError:
+            pass
+        except subprocess.CalledProcessError:
+            pass
+
+        if not shutil.which("pkexec"):
+            return (
+                False,
+                "No graphical privilege helper is available on this system. Install polkit/pkexec or run the suggested chown/chmod commands manually.",
+            )
+
+        try:
+            subprocess.run(
+                ["pkexec", sys.executable, "-c", fix_script, username, path],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            return True, ""
+        except FileNotFoundError:
+            return False, "The pkexec command is not available on this system."
+        except subprocess.CalledProcessError as exc:
+            details = (exc.stderr or exc.stdout or str(exc)).strip()
+            if not details:
+                details = "Administrator approval was denied or the permission repair command failed."
+            return False, details
+
+    def _report_blocked_sync(self, profile_id: str, profile_name: str, message: str, interactive: bool) -> None:
+        if not message:
+            return
+        event = SyncEvent("error", message)
+        event._profile_id = profile_id  # type: ignore[attr-defined]
+        self._event_queue.put(event)
+
+        if interactive:
+            from tkinter import messagebox
+
+            messagebox.showerror(f"Cannot Start Sync: {profile_name}", message)
 
     # ==================================================================
     # Event pump (queue → UI thread)

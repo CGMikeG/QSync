@@ -24,7 +24,7 @@ import tempfile
 import threading
 from datetime import datetime
 from enum import Enum, auto
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -45,7 +45,7 @@ class SyncEvent:
 
     def __init__(
         self,
-        kind: str,           # "info" | "copy" | "delete" | "skip" | "error" | "success" | "warning"
+        kind: str,           # "info" | "compare" | "copy" | "delete" | "skip" | "error" | "success" | "warning"
         message: str,
         rel_path: str = "",
         progress: float = 0.0,
@@ -108,26 +108,33 @@ class LocalFS:
         root: str,
         include_patterns: List[str],
         exclude_patterns: List[str],
+        follow_symlinks: bool = False,
+        progress_cb: Optional[Callable[[str], None]] = None,
     ) -> List[FileInfo]:
         root_path = os.path.abspath(root)
         if not os.path.exists(root_path):
             raise FileNotFoundError(f"Source path does not exist: {root_path}")
 
         files: List[FileInfo] = []
-        for dirpath, dirnames, filenames in os.walk(root_path, followlinks=False):
+        for dirpath, dirnames, filenames in os.walk(root_path, followlinks=follow_symlinks):
             # Filter out excluded directories in-place
             dirnames[:] = [
                 d for d in dirnames
                 if not LocalFS._excluded(d, exclude_patterns, include_patterns)
+                and (follow_symlinks or not os.path.islink(os.path.join(dirpath, d)))
             ]
             for name in filenames:
                 full = os.path.join(dirpath, name)
                 rel = os.path.relpath(full, root_path).replace("\\", "/")
                 if LocalFS._excluded(name, exclude_patterns, include_patterns, rel):
                     continue
+                if not follow_symlinks and os.path.islink(full):
+                    continue
                 try:
                     st = os.stat(full)
                     files.append(FileInfo(full, rel, st.st_size, st.st_mtime))
+                    if progress_cb:
+                        progress_cb(rel)
                 except OSError:
                     continue
 
@@ -159,6 +166,10 @@ class LocalFS:
                     return False
             return True
         return False
+
+    @staticmethod
+    def checksum(file_info: FileInfo) -> str:
+        return file_info.checksum()
 
     @staticmethod
     def copy_file(
@@ -193,14 +204,42 @@ class LocalFS:
         required as long as the current user owns the file.
         """
         try:
-            os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+            LocalFS._grant_delete_access(path)
             func(path)
         except Exception:
             pass  # still can't delete; surface nothing here, caller tracks the error
 
     @staticmethod
-    def delete(path: str) -> None:
-        if os.path.isdir(path):
+    def _grant_delete_access(path: str) -> None:
+        """Best-effort permission fix-up for delete retries.
+
+        On POSIX systems, deleting an entry depends on the parent directory's
+        write/execute bits, not only the file's mode. On Windows and SMB shares,
+        clearing a read-only bit on the entry itself is often enough. Adjust both
+        so a retry can succeed when the current user already owns the paths.
+        """
+        try:
+            target_mode = os.stat(path).st_mode
+            extra_bits = stat.S_IWUSR | stat.S_IREAD
+            if stat.S_ISDIR(target_mode):
+                extra_bits |= stat.S_IXUSR
+            os.chmod(path, stat.S_IMODE(target_mode) | extra_bits)
+        except Exception:
+            pass
+
+        parent = os.path.dirname(path) or "."
+        try:
+            parent_mode = os.stat(parent).st_mode
+            os.chmod(
+                parent,
+                stat.S_IMODE(parent_mode) | stat.S_IWUSR | stat.S_IREAD | stat.S_IXUSR,
+            )
+        except Exception:
+            pass
+
+    @staticmethod
+    def delete(path: str, is_dir: bool = False) -> None:
+        if is_dir or os.path.isdir(path):
             shutil.rmtree(path, onerror=LocalFS._force_remove)
             # rmtree with onerror swallows individual failures; verify the dir is gone
             if os.path.exists(path):
@@ -210,11 +249,12 @@ class LocalFS:
                 )
         else:
             try:
+                LocalFS._grant_delete_access(path)
                 os.remove(path)
             except PermissionError:
                 # Try clearing read-only bit and retry once
                 try:
-                    os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+                    LocalFS._grant_delete_access(path)
                     os.remove(path)
                 except Exception as inner:
                     raise PermissionError(
@@ -289,6 +329,8 @@ class SFTPFS:
         root: str,
         include_patterns: List[str],
         exclude_patterns: List[str],
+        follow_symlinks: bool = False,
+        progress_cb: Optional[Callable[[str], None]] = None,
     ) -> List[FileInfo]:
         import stat as stat_mod  # noqa: PLC0415
 
@@ -306,11 +348,20 @@ class SFTPFS:
                 files.append(
                     FileInfo(abs_path, rel, entry.st_size or 0, entry.st_mtime or 0, is_dir)
                 )
+                if progress_cb and not is_dir:
+                    progress_cb(rel)
                 if is_dir:
                     _walk(abs_path, rel)
 
         _walk(root.rstrip("/"), "")
         return files
+
+    def checksum(self, file_info: FileInfo) -> str:
+        h = hashlib.md5()
+        with self._sftp.open(file_info.abs_path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(65536), b""):
+                h.update(chunk)
+        return h.hexdigest()
 
     def upload(
         self,
@@ -430,9 +481,11 @@ class SyncEngine:
             if isinstance(src_fs, SFTPFS):
                 self._emit("info", f"Connecting to source {src_cfg.host} …")
                 src_fs.connect()
+                self._emit("info", f"Connected to source {src_cfg.host}:{src_cfg.path}")
             if isinstance(dst_fs, SFTPFS):
                 self._emit("info", f"Connecting to destination {dst_cfg.host} …")
                 dst_fs.connect()
+                self._emit("info", f"Connected to destination {dst_cfg.host}:{dst_cfg.path}")
 
             try:
                 self._sync(src_fs, src_cfg, dst_fs, dst_cfg)
@@ -472,13 +525,25 @@ class SyncEngine:
 
         # ---- scan -------------------------------------------------
         self._emit("info", "Scanning source …")
-        src_files = src_fs.scan(src_cfg.path, flt.include_patterns, flt.exclude_patterns)
+        src_files = src_fs.scan(
+            src_cfg.path,
+            flt.include_patterns,
+            flt.exclude_patterns,
+            opts.follow_symlinks,
+            progress_cb=lambda rel: self._emit("info", f"Scanning source: {rel}", rel),
+        )
         if self._cancel:
             return
 
         self._emit("info", "Scanning destination …")
         try:
-            dst_files = dst_fs.scan(dst_cfg.path, [], [])
+            dst_files = dst_fs.scan(
+                dst_cfg.path,
+                [],
+                [],
+                opts.follow_symlinks,
+                progress_cb=lambda rel: self._emit("info", f"Scanning destination: {rel}", rel),
+            )
         except FileNotFoundError:
             dst_files = []
         if self._cancel:
@@ -486,78 +551,155 @@ class SyncEngine:
 
         src_map: Dict[str, FileInfo] = {f.rel_path: f for f in src_files}
         dst_map: Dict[str, FileInfo] = {f.rel_path: f for f in dst_files}
+        self.status = SyncStatus.SYNCING
+        if opts.mode == "two_way":
+            self._sync_two_way(src_fs, src_cfg, src_map, dst_fs, dst_cfg, dst_map, opts)
+        else:
+            self._sync_one_way(src_fs, src_map, dst_fs, dst_cfg, dst_map, opts)
 
-        file_entries = [(p, f) for p, f in src_map.items() if not f.is_dir]
+        # ---- delete extras (mirror mode) -------------------------
+        if opts.mode != "two_way" and (opts.mode == "mirror" or opts.delete_extra):
+            delete_entries = [
+                (rel, dst_f) for rel, dst_f in dst_map.items() if rel not in src_map
+            ]
+            delete_entries.sort(
+                key=lambda item: (item[0].count("/"), 1 if item[1].is_dir else 0),
+                reverse=True,
+            )
+            for rel, dst_f in delete_entries:
+                if self._cancel:
+                    return
+                dst_abs = self._join(dst_cfg, rel)
+                self._emit("delete", f"Deleting {rel}", rel)
+                try:
+                    dst_fs.delete(dst_abs, dst_f.is_dir)
+                except Exception as exc:
+                    self._emit("error", f"Delete failed [{rel}]: {exc}", rel)
+
+    def _sync_one_way(self, src_fs, src_map, dst_fs, dst_cfg, dst_map, opts) -> None:
+        file_entries = [(rel, src_f) for rel, src_f in src_map.items() if not src_f.is_dir]
         total = len(file_entries)
         done = 0
 
-        self.status = SyncStatus.SYNCING
         self._emit("info", f"Found {total} file(s) in source.")
 
-        # ---- copy source → destination ----------------------------
         for rel, src_f in file_entries:
             if self._cancel:
                 return
 
             dst_f = dst_map.get(rel)
-            should_copy = self._needs_copy(src_f, dst_f, opts)
+            reason = self._compare_reason(src_fs, src_f, dst_fs, dst_f, opts)
+            self._emit("compare", f"Comparing {rel}", rel, done / max(total, 1))
 
-            if should_copy:
+            if reason:
                 src_abs = src_f.abs_path
                 dst_abs = self._join(dst_cfg, rel)
-                self._emit("copy", f"Copying  {rel}", rel, done / max(total, 1))
+                self._emit("copy", f"Copying {rel} ({reason})", rel, done / max(total, 1))
                 try:
-                    self._transfer(src_fs, src_abs, dst_fs, dst_abs, opts.preserve_timestamps, rel)
+                    self._transfer(src_fs, src_abs, dst_fs, dst_abs, opts.preserve_timestamps)
                 except Exception as exc:
                     self._emit("error", f"Copy failed [{rel}]: {exc}", rel)
             else:
-                self._emit("skip", f"Up-to-date {rel}", rel)
+                self._emit("skip", f"Skipping {rel} (up-to-date)", rel, done / max(total, 1))
 
             done += 1
             self._emit("info", f"Progress: {done}/{total}", progress=done / max(total, 1))
 
-        # ---- delete extras (mirror mode) -------------------------
-        if opts.mode == "mirror" or opts.delete_extra:
-            for rel, dst_f in list(dst_map.items()):
-                if self._cancel:
-                    return
-                if rel not in src_map:
-                    dst_abs = self._join(dst_cfg, rel)
-                    self._emit("delete", f"Deleting {rel}", rel)
-                    try:
-                        dst_fs.delete(dst_abs, dst_f.is_dir)
-                    except Exception as exc:
-                        self._emit("error", f"Delete failed [{rel}]: {exc}", rel)
+    def _sync_two_way(self, src_fs, src_cfg, src_map, dst_fs, dst_cfg, dst_map, opts) -> None:
+        file_paths = sorted(
+            {
+                rel
+                for rel, file_info in src_map.items()
+                if not file_info.is_dir
+            }
+            | {
+                rel
+                for rel, file_info in dst_map.items()
+                if not file_info.is_dir
+            }
+        )
+        total = len(file_paths)
+        done = 0
 
-        # ---- two-way: copy dst-only files back to source ----------
-        if opts.mode == "two_way":
-            dst_only = [(r, f) for r, f in dst_map.items() if r not in src_map and not f.is_dir]
-            for rel, dst_f in dst_only:
-                if self._cancel:
-                    return
-                src_abs = self._join(src_cfg, rel)
-                self._emit("copy", f"Two-way copy ← {rel}", rel)
+        self._emit("info", f"Found {total} file(s) across both sides.")
+        if opts.delete_extra:
+            self._emit("warning", "Ignoring delete-extra option in two-way mode.")
+
+        for rel in file_paths:
+            if self._cancel:
+                return
+
+            src_f = src_map.get(rel)
+            dst_f = dst_map.get(rel)
+            self._emit("compare", f"Comparing {rel}", rel, done / max(total, 1))
+
+            direction, reason = self._resolve_two_way_action(src_fs, src_f, dst_fs, dst_f, opts)
+            if direction == "src_to_dst" and src_f is not None:
+                dst_abs = self._join(dst_cfg, rel)
+                self._emit("copy", f"Copying {rel} to destination ({reason})", rel, done / max(total, 1))
                 try:
-                    self._transfer(dst_fs, dst_f.abs_path, src_fs, src_abs, opts.preserve_timestamps, rel)
+                    self._transfer(src_fs, src_f.abs_path, dst_fs, dst_abs, opts.preserve_timestamps)
                 except Exception as exc:
                     self._emit("error", f"Two-way copy failed [{rel}]: {exc}", rel)
+            elif direction == "dst_to_src" and dst_f is not None:
+                src_abs = self._join(src_cfg, rel)
+                self._emit("copy", f"Copying {rel} to source ({reason})", rel, done / max(total, 1))
+                try:
+                    self._transfer(dst_fs, dst_f.abs_path, src_fs, src_abs, opts.preserve_timestamps)
+                except Exception as exc:
+                    self._emit("error", f"Two-way copy failed [{rel}]: {exc}", rel)
+            else:
+                self._emit("skip", f"Skipping {rel} (already matched)", rel, done / max(total, 1))
+
+            done += 1
+            self._emit("info", f"Progress: {done}/{total}", progress=done / max(total, 1))
 
     # ------------------------------------------------------------------
     @staticmethod
-    def _needs_copy(src: FileInfo, dst: Optional[FileInfo], opts) -> bool:
+    def _compare_reason(src_fs, src: FileInfo, dst_fs, dst: Optional[FileInfo], opts) -> str:
         if dst is None:
-            return True
+            return "new file"
         if opts.verify_checksums:
             try:
-                return src.checksum() != dst.checksum()
+                if src_fs.checksum(src) != dst_fs.checksum(dst):
+                    return "checksum changed"
+                return ""
             except Exception:
-                return True
-        # Size or mtime differ
+                pass
         if src.size != dst.size:
-            return True
+            return "size changed"
         if abs(src.mtime - dst.mtime) > 2:
-            return True
-        return False
+            return "modified time changed"
+        return ""
+
+    @staticmethod
+    def _resolve_two_way_action(src_fs, src: Optional[FileInfo], dst_fs, dst: Optional[FileInfo], opts) -> tuple[str, str]:
+        if src is None and dst is None:
+            return "", ""
+        if src is None:
+            return "dst_to_src", "new file on destination"
+        if dst is None:
+            return "src_to_dst", "new file on source"
+
+        compare_reason = SyncEngine._compare_reason(src_fs, src, dst_fs, dst, opts)
+        if not compare_reason:
+            return "", ""
+
+        if src.mtime > dst.mtime + 2:
+            return "src_to_dst", "source is newer"
+        if dst.mtime > src.mtime + 2:
+            return "dst_to_src", "destination is newer"
+
+        if compare_reason == "checksum changed":
+            return "src_to_dst", "content changed with matching timestamps"
+
+        if src.size != dst.size:
+            if src.size > dst.size:
+                return "src_to_dst", "source size is larger at same timestamp"
+            if dst.size > src.size:
+                return "dst_to_src", "destination size is larger at same timestamp"
+
+        return "src_to_dst", compare_reason
 
     @staticmethod
     def _join(cfg, rel: str) -> str:
@@ -572,7 +714,6 @@ class SyncEngine:
         dst_fs,
         dst_abs: str,
         preserve_ts: bool,
-        rel: str,
     ) -> None:
         if isinstance(src_fs, LocalFS) and isinstance(dst_fs, LocalFS):
             LocalFS.copy_file(src_abs, dst_abs, preserve_ts)

@@ -14,6 +14,37 @@ from typing import Dict, List, Optional
 from core.config import APP_DIR_NAME, LEGACY_APP_DIR_NAME
 
 
+def get_delete_permission_issue(profile: "Profile") -> Optional[str]:
+    """Return a Linux-specific delete permission warning for a profile."""
+    opts = profile.options
+    dst_cfg = profile.destination
+    if os.name != "posix":
+        return None
+    if dst_cfg.type != "local":
+        return None
+    if not (opts.mode == "mirror" or opts.delete_extra):
+        return None
+
+    dst_path = os.path.expanduser(dst_cfg.path or "")
+    if not dst_path or not os.path.exists(dst_path):
+        return None
+    if not os.path.isdir(dst_path):
+        return None
+    if os.access(dst_path, os.W_OK | os.X_OK):
+        return None
+
+    return (
+        "Delete-capable sync is blocked because the destination folder is not writable by the current user.\n\n"
+        f"Folder: {dst_path}\n\n"
+        "On Linux, deleting files depends on the destination directory permissions, not just the file itself. "
+        "Do not run the whole app with sudo; that can make profiles and synced files root-owned.\n\n"
+        "Safer fix:\n"
+        f"1. sudo chown -R $USER:$USER \"{dst_path}\"\n"
+        f"2. chmod -R u+rwX \"{dst_path}\"\n\n"
+        "If this folder must stay owned by another account, run QueekSync against a user-writable destination instead."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------

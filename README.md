@@ -176,6 +176,10 @@ Linux:
   - Ensure WSLg or an X server is configured
 - Linux launcher exits with missing tkinter:
   - Install the Tk package for your distro, commonly python3-tk or python3-tkinter
+- Mirror or delete-extra sync fails on Linux:
+  - The destination folder must be writable and executable by your user because Linux delete permissions are controlled by the parent directory
+  - Manual sync now offers a one-time admin approval prompt to repair the destination folder and continue automatically when `pkexec` is available
+  - Prefer fixing the folder with `chown` or `chmod u+rwX` instead of running the whole app with sudo
 - Dependency errors:
   - Reinstall from requirements.txt inside the project virtual environment
 

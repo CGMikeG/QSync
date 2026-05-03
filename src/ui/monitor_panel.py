@@ -4,14 +4,13 @@ Monitor panel – live sync progress, per-profile log stream, and history.
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import TYPE_CHECKING, Dict, List
 
 import customtkinter as ctk
 
-from core.syncer import SyncEvent, SyncStatus
+from core.syncer import SyncEvent
 from ui import theme as T
-from ui.components import GlassCard, LogViewer, PrimaryButton, Separator
+from ui.components import GlassCard, LogViewer, Separator
 
 if TYPE_CHECKING:
     from ui.app import QueekSyncApp
@@ -80,6 +79,8 @@ class ActiveSyncCard(GlassCard):
     # ------------------------------------------------------------------
 
     def update_event(self, event: SyncEvent) -> None:
+        detail = (event.message or event.rel_path or "Working…")[:100]
+
         if event.kind in ("success", "error", "warning"):
             self._done = True
             self._progress.stop()
@@ -94,14 +95,26 @@ class ActiveSyncCard(GlassCard):
                 self._status_lbl.configure(text="Error ✖", text_color=T.ERROR)
             else:
                 self._status_lbl.configure(text="Cancelled", text_color=T.WARNING)
-            self._file_lbl.configure(text=event.message[:100])
-        elif event.kind == "info" and event.progress > 0:
+            self._file_lbl.configure(text=detail)
+            return
+
+        if event.progress > 0:
             self._progress.stop()
             self._progress.configure(mode="determinate")
             self._progress.set(event.progress)
-            self._status_lbl.configure(text=f"{event.progress*100:.0f}%", text_color=T.ACCENT)
-        elif event.rel_path:
-            self._file_lbl.configure(text=event.rel_path[:80])
+
+        status_text = {
+            "info": "Working…",
+            "compare": "Comparing…",
+            "copy": "Copying…",
+            "delete": "Deleting…",
+            "skip": "Up-to-date",
+        }.get(event.kind, "Running…")
+        status_color = T.WARNING if event.kind == "delete" else T.ACCENT
+        if event.progress > 0:
+            status_text = f"{status_text} {event.progress*100:.0f}%"
+        self._status_lbl.configure(text=status_text, text_color=status_color)
+        self._file_lbl.configure(text=detail)
 
     def _cancel(self) -> None:
         self._app.cancel_sync(self._pid)

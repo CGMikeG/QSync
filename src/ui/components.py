@@ -370,6 +370,7 @@ class LogViewer(ctk.CTkTextbox):
 
         # Tag colours
         self._text_widget().tag_configure("info",    foreground=T.TEXT_MUTED)
+        self._text_widget().tag_configure("compare", foreground=T.ACCENT)
         self._text_widget().tag_configure("copy",    foreground=T.INFO)
         self._text_widget().tag_configure("delete",  foreground=T.WARNING)
         self._text_widget().tag_configure("skip",    foreground=T.TEXT_DIM)

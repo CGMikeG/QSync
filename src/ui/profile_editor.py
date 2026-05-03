@@ -5,12 +5,12 @@ Profile editor dialog – tabbed form for creating / editing a sync profile.
 from __future__ import annotations
 
 import os
-from tkinter import filedialog
+from tkinter import filedialog, messagebox
 from typing import Callable, List, Optional
 
 import customtkinter as ctk
 
-from core.profile import FilterConfig, Profile, PROFILE_COLOURS, ScheduleConfig
+from core.profile import FilterConfig, Profile, PROFILE_COLOURS, ScheduleConfig, get_delete_permission_issue
 from ui import theme as T
 from ui.components import ColourPicker, GlassCard, LabelledEntry, PrimaryButton, Separator, attach_tooltip
 
@@ -256,6 +256,9 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             )
         path_entry_holder.set(cfg.path if cfg.type == "local" else "")
         path_entry_holder.grid(row=0, column=0, sticky="ew")
+        if not is_source:
+            path_entry_holder.entry.bind("<KeyRelease>", self._schedule_delete_notice_refresh, add="+")
+            path_entry_holder.entry.bind("<FocusOut>", self._schedule_delete_notice_refresh, add="+")
 
         browse_btn = ctk.CTkButton(
             local_frame, text="Browse…", width=90, height=30,
@@ -400,6 +403,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         path = filedialog.askdirectory(title="Select folder")
         if path:
             entry.set(path)
+            self._schedule_delete_notice_refresh()
 
     def _browse_remote(
         self,
@@ -538,13 +542,73 @@ class ProfileEditorDialog(ctk.CTkToplevel):
                 fg_color=T.ACCENT, hover_color=T.ACCENT_HOVER, text_color=T.TEXT,
             )
             box.pack(anchor="w", pady=3)
+            if attr == "_opt_delete":
+                self._delete_opt_box = box
             tip_text = {
-                "_opt_delete": "Remove files from the destination when they no longer exist in the source. Example: enable this for a true mirror backup, but leave it off for archives where old files must stay.",
+                "_opt_delete": "Remove files from the destination when they no longer exist in the source. Example: enable this for a true mirror backup, but leave it off for archives where old files must stay. On Linux, the destination folder itself must be writable and executable by your user for deletes to succeed.",
                 "_opt_ts": "Keep original modification times after copying. Example: enable this when photo dates or build timestamps matter.",
                 "_opt_symlinks": "Follow symbolic links and sync the files they point to. Example: turn this on only if your source folder contains useful linked directories.",
                 "_opt_checksum": "Compare file contents using checksums instead of faster metadata checks. Example: use this for critical backups when you want higher confidence and can accept slower runs.",
             }
             attach_tooltip(box, text=tip_text[attr])
+
+        self._delete_opt_saved_value = self._opt_delete.get()
+        self._delete_mode_note = ctk.CTkLabel(
+            frm,
+            text="",
+            font=ctk.CTkFont(size=11),
+            text_color=T.TEXT_DIM,
+            anchor="w",
+            justify="left",
+            wraplength=560,
+        )
+        self._delete_mode_note.pack(fill="x", pady=(0, T.PAD_XS))
+        self._delete_mode_note.pack_forget()
+
+        self._linux_delete_notice = ctk.CTkFrame(
+            frm,
+            fg_color="#2b1f12",
+            border_color="#7c5a16",
+            border_width=1,
+            corner_radius=T.RADIUS_MD,
+        )
+        self._linux_delete_notice.grid_columnconfigure(0, weight=1)
+
+        self._linux_delete_notice_label = ctk.CTkLabel(
+            self._linux_delete_notice,
+            text="",
+            justify="left",
+            anchor="w",
+            text_color=T.TEXT,
+            font=ctk.CTkFont(size=11),
+            wraplength=560,
+        )
+        self._linux_delete_notice_label.grid(row=0, column=0, sticky="ew", padx=T.PAD_MD, pady=T.PAD_MD)
+
+        self._copy_fix_btn = ctk.CTkButton(
+            self._linux_delete_notice,
+            text="Copy Linux Fix Commands",
+            height=30,
+            width=190,
+            corner_radius=T.RADIUS_SM,
+            fg_color="transparent",
+            hover_color=T.BG_HOVER,
+            text_color=T.ACCENT,
+            border_color=T.ACCENT,
+            border_width=1,
+            command=self._copy_linux_delete_fix,
+        )
+        self._copy_fix_btn.grid(row=1, column=0, sticky="w", padx=T.PAD_MD, pady=(0, T.PAD_MD))
+        attach_tooltip(
+            self._copy_fix_btn,
+            text="Copy the recommended Linux permission commands for this destination folder. Example: paste them into a terminal, run them once, then retry the sync."
+        )
+        self._linux_delete_notice.pack_forget()
+
+        self._mode_var.trace_add("write", self._schedule_delete_notice_refresh)
+        self._opt_delete.trace_add("write", self._schedule_delete_notice_refresh)
+        self._dst_type.trace_add("write", self._schedule_delete_notice_refresh)
+        self._schedule_delete_notice_refresh()
 
         Separator(frm).pack(fill="x", pady=T.PAD_MD)
 
@@ -753,6 +817,15 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         p.filters.include_patterns = _lines(self._include_box)
         p.filters.exclude_patterns = _lines(self._exclude_box)
 
+        permission_issue = get_delete_permission_issue(p)
+        if permission_issue:
+            if not messagebox.askyesno(
+                "Linux Permission Warning",
+                permission_issue + "\n\nSave this profile anyway?",
+                parent=self,
+            ):
+                return
+
         # Commit to original
         self._profile.__dict__.update(p.__dict__)
 
@@ -761,3 +834,76 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         _profile = self._profile
         self.destroy()
         _on_save(_profile)
+
+    def _schedule_delete_notice_refresh(self, *_args) -> None:
+        self.after_idle(self._refresh_delete_notice)
+
+    def _refresh_delete_notice(self) -> None:
+        self._refresh_delete_option_state()
+
+        if not hasattr(self, "_linux_delete_notice"):
+            return
+
+        preview = Profile.from_dict(self._working.to_dict())
+        preview.destination.type = self._dst_type.get()
+        if preview.destination.type == "local":
+            preview.destination.path = self._dst_local_path.get().strip()
+        else:
+            preview.destination.path = self._dst_sftp_path.get().strip()
+        preview.options.mode = self._mode_var.get()
+        preview.options.delete_extra = self._opt_delete.get()
+
+        issue = get_delete_permission_issue(preview)
+        if issue:
+            self._linux_delete_notice_label.configure(
+                text=(
+                    "Linux delete warning: this profile can remove files, but the current destination folder "
+                    "does not have the write and execute permissions your user needs for deletion."
+                )
+            )
+            self._linux_delete_notice.pack(fill="x", pady=(T.PAD_SM, 0))
+        else:
+            self._linux_delete_notice.pack_forget()
+
+    def _refresh_delete_option_state(self) -> None:
+        if not hasattr(self, "_delete_opt_box"):
+            return
+
+        is_two_way = self._mode_var.get() == "two_way"
+        if is_two_way:
+            if self._delete_opt_box.cget("state") != "disabled":
+                self._delete_opt_saved_value = self._opt_delete.get()
+                self._opt_delete.set(False)
+                self._delete_opt_box.configure(state="disabled")
+            self._delete_mode_note.configure(
+                text="Delete extra files is disabled in Two-way mode because bidirectional sync should not remove files that exist on only one side."
+            )
+            self._delete_mode_note.pack(fill="x", pady=(0, T.PAD_XS))
+        else:
+            if self._delete_opt_box.cget("state") == "disabled":
+                self._delete_opt_box.configure(state="normal")
+                self._opt_delete.set(self._delete_opt_saved_value)
+            self._delete_mode_note.pack_forget()
+
+    def _copy_linux_delete_fix(self) -> None:
+        path = self._dst_local_path.get().strip()
+        if not path:
+            messagebox.showwarning(
+                "Linux Permission Fix",
+                "Set a local destination folder first so QueekSync can build the correct permission commands.",
+                parent=self,
+            )
+            return
+
+        expanded = os.path.expanduser(path)
+        commands = (
+            f'sudo chown -R $USER:$USER "{expanded}"\n'
+            f'chmod -R u+rwX "{expanded}"'
+        )
+        self.clipboard_clear()
+        self.clipboard_append(commands)
+        messagebox.showinfo(
+            "Linux Permission Fix",
+            "Copied the recommended Linux permission commands to the clipboard.",
+            parent=self,
+        )
