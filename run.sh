@@ -89,6 +89,17 @@ if [ ! -f "$VENV/bin/python" ]; then
     python3 -m venv "$VENV"
 fi
 
+if ! "$VENV/bin/python" -m pip --version >/dev/null 2>&1; then
+    echo "[QueekSync] Installing pip in virtual environment..."
+    "$VENV/bin/python" -m ensurepip --upgrade >/dev/null 2>&1 || true
+fi
+
+if ! "$VENV/bin/python" -m pip --version >/dev/null 2>&1; then
+    echo "[QueekSync] ERROR: pip is not available in the virtual environment." >&2
+    echo "[QueekSync] Fix: install the system package that provides venv/ensurepip (often python3-venv) and re-run." >&2
+    exit 1
+fi
+
 if ! "$VENV/bin/python" -c "import tkinter" >/dev/null 2>&1; then
     echo "[QueekSync] Missing tkinter support in the selected Python installation." >&2
     echo "[QueekSync] QueekSync uses customtkinter, which depends on the system Tk libraries." >&2

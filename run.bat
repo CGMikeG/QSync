@@ -27,6 +27,20 @@ if not exist "%PYTHON%" (
     echo [QueekSync] Ready.
 )
 
+"%PYTHON%" -m pip --version >nul 2>&1
+if errorlevel 1 (
+    echo [QueekSync] Installing pip in virtual environment...
+    "%PYTHON%" -m ensurepip --upgrade >nul 2>&1
+)
+
+"%PYTHON%" -m pip --version >nul 2>&1
+if errorlevel 1 (
+    echo [QueekSync] ERROR: pip is not available in the virtual environment.
+    echo [QueekSync] Fix: reinstall/repair Python and ensure the venv components are installed, then re-run.
+    pause
+    exit /b 1
+)
+
 "%PYTHON%" -c "import tkinter" >nul 2>&1
 if errorlevel 1 (
     echo [QueekSync] ERROR: tkinter is not available in this Python installation.

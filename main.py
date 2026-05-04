@@ -49,6 +49,42 @@ def _write_requirements_stamp(requirements_hash: str) -> None:
         fh.write(requirements_hash)
 
 
+def _ensure_pip(venv_python: str) -> None:
+    try:
+        subprocess.run(
+            [venv_python, "-m", "pip", "--version"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return
+    except subprocess.CalledProcessError:
+        pass
+
+    print("[QueekSync] pip is missing in the project virtual environment. Installing it...")
+    try:
+        subprocess.run(
+            [venv_python, "-m", "ensurepip", "--upgrade"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except subprocess.CalledProcessError:
+        print("[QueekSync] ERROR: Failed to install pip into the project virtual environment.")
+        print(
+            "[QueekSync] Fix: install the system package that provides venv/ensurepip "
+            "(often python3-venv) and re-run."
+        )
+        raise
+
+    subprocess.run(
+        [venv_python, "-m", "pip", "--version"],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
 def _install_project_dependencies(venv_python: str) -> None:
     print("[QueekSync] Syncing dependencies in project virtual environment...")
     subprocess.run(
@@ -64,13 +100,16 @@ def _ensure_project_venv() -> None:
         print("[QueekSync] Creating project virtual environment...")
         builder = venv.EnvBuilder(with_pip=True)
         builder.create(VENV_DIR)
+    _ensure_pip(venv_python)
 
 
 def _ensure_project_dependencies() -> None:
     expected_hash = _requirements_hash()
     if _read_requirements_stamp() == expected_hash:
         return
-    _install_project_dependencies(_venv_python_path())
+    venv_python = _venv_python_path()
+    _ensure_pip(venv_python)
+    _install_project_dependencies(venv_python)
 
 
 def _reexec_into_project_venv() -> None:
