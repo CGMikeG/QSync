@@ -1,4 +1,4 @@
-"""
+﻿"""
 Reusable UI components built on top of customtkinter.
 """
 
@@ -341,12 +341,19 @@ class LabelledEntry(ctk.CTkFrame):
             attach_tooltip(self, self.label, self.entry, text=tooltip_text)
 
     def get(self) -> str:
-        return self.entry.get()
+        try:
+            return self.entry.get()
+        except tk.TclError:
+            return ""
 
     def set(self, value: str) -> None:
-        self.entry.delete(0, "end")
-        self.entry.insert(0, value)
-
+        if not self.winfo_exists() or not self.entry.winfo_exists():
+            return
+        try:
+            self.entry.delete(0, "end")
+            self.entry.insert(0, value)
+        except tk.TclError:
+            return
 
 # ---------------------------------------------------------------------------
 # Log text viewer
@@ -476,3 +483,4 @@ class ColourPicker(ctk.CTkFrame):
 
     def set(self, colour: str) -> None:
         self._pick(colour)
+

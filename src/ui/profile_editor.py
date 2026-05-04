@@ -1,4 +1,4 @@
-"""
+﻿"""
 Profile editor dialog – tabbed form for creating / editing a sync profile.
 """
 
@@ -400,9 +400,13 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             self._dst_sftp_path = sftp_path_entry
 
     def _browse(self, entry: LabelledEntry) -> None:
-        path = filedialog.askdirectory(title="Select folder")
-        if path:
-            entry.set(path)
+        path = filedialog.askdirectory(title="Select folder", parent=self)
+        if not path:
+            return
+        if not self.winfo_exists() or not entry.winfo_exists():
+            return
+        entry.set(path)
+        if self.winfo_exists():
             self._schedule_delete_notice_refresh()
 
     def _browse_remote(
@@ -431,6 +435,8 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         from ui.sftp_browser import SFTPBrowserDialog
 
         def _on_select(selected_path: str) -> None:
+            if not self.winfo_exists() or not path_entry.winfo_exists():
+                return
             path_entry.set(selected_path)
 
         SFTPBrowserDialog(
@@ -907,3 +913,5 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             "Copied the recommended Linux permission commands to the clipboard.",
             parent=self,
         )
+
+
