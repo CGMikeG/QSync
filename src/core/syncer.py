@@ -120,13 +120,19 @@ class LocalFS:
             # Filter out excluded directories in-place
             dirnames[:] = [
                 d for d in dirnames
-                if not LocalFS._excluded(d, exclude_patterns, include_patterns)
+                if not LocalFS._excluded(
+                    d,
+                    exclude_patterns,
+                    include_patterns,
+                    os.path.relpath(os.path.join(dirpath, d), root_path).replace("\\", "/"),
+                    is_dir=True,
+                )
                 and (follow_symlinks or not os.path.islink(os.path.join(dirpath, d)))
             ]
             for name in filenames:
                 full = os.path.join(dirpath, name)
                 rel = os.path.relpath(full, root_path).replace("\\", "/")
-                if LocalFS._excluded(name, exclude_patterns, include_patterns, rel):
+                if LocalFS._excluded(name, exclude_patterns, include_patterns, rel, is_dir=False):
                     continue
                 if not follow_symlinks and os.path.islink(full):
                     continue
@@ -156,15 +162,47 @@ class LocalFS:
         exclude: List[str],
         include: List[str],
         rel: str = "",
+        is_dir: bool = False,
     ) -> bool:
         for pat in exclude:
-            if fnmatch.fnmatch(name, pat) or (rel and fnmatch.fnmatch(rel, pat)):
+            if LocalFS._matches_pattern(name, rel, pat, is_dir):
                 return True
+        # Always traverse directories unless they are explicitly excluded.
+        # This lets file include patterns like *.txt still match deeper files.
+        if is_dir:
+            return False
         if include:
             for pat in include:
-                if fnmatch.fnmatch(name, pat) or (rel and fnmatch.fnmatch(rel, pat)):
+                if LocalFS._matches_pattern(name, rel, pat, is_dir):
                     return False
             return True
+        return False
+
+    @staticmethod
+    def _matches_pattern(name: str, rel: str, pattern: str, is_dir: bool) -> bool:
+        pat = pattern.replace("\\", "/").strip()
+        if not pat:
+            return False
+
+        variants = {name}
+        if is_dir:
+            variants.add(f"{name}/")
+        if rel:
+            rel_parts = rel.split("/")
+            for idx in range(len(rel_parts)):
+                suffix = "/".join(rel_parts[idx:])
+                variants.add(suffix)
+                if is_dir:
+                    variants.add(f"{suffix}/")
+
+        if any(fnmatch.fnmatch(variant, pat) for variant in variants):
+            return True
+
+        if pat.endswith("/**"):
+            base = pat[:-3].rstrip("/")
+            if base and any(variant == base or variant.startswith(f"{base}/") for variant in variants):
+                return True
+
         return False
 
     @staticmethod
@@ -345,6 +383,14 @@ class SFTPFS:
                 rel = f"{rel_base}/{entry.filename}".lstrip("/")
                 abs_path = f"{remote_dir}/{entry.filename}"
                 is_dir = stat_mod.S_ISDIR(entry.st_mode)
+                if LocalFS._excluded(
+                    entry.filename,
+                    exclude_patterns,
+                    include_patterns,
+                    rel,
+                    is_dir=is_dir,
+                ):
+                    continue
                 files.append(
                     FileInfo(abs_path, rel, entry.st_size or 0, entry.st_mtime or 0, is_dir)
                 )

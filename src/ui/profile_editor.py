@@ -749,7 +749,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         attach_tooltip(
             exclude_label,
             self._exclude_box,
-            text="Files matching these patterns will be skipped. Example: add .git, node_modules/**, or *.tmp to avoid syncing temporary or generated files."
+            text="Files or folders matching these patterns will be skipped. Example: add .venv, .git, node_modules, or *.tmp to avoid syncing virtual environments, repository metadata, and generated files."
         )
 
         filter_hint = ctk.CTkLabel(
@@ -760,7 +760,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         filter_hint.grid(row=4, column=0, columnspan=2, sticky="w", padx=T.PAD_SM)
         attach_tooltip(
             filter_hint,
-            text="Patterns use fnmatch-style matching. Examples: *.jpg matches image files, docs/** targets everything under docs, and .git excludes Git metadata folders."
+            text="Patterns use fnmatch-style matching. Examples: *.jpg matches image files, docs/** targets everything under docs, and folder names like .venv or .git exclude those directories and their contents."
         )
 
     # ==================================================================
@@ -913,5 +913,4 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             "Copied the recommended Linux permission commands to the clipboard.",
             parent=self,
         )
-
 
