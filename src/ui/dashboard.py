@@ -5,6 +5,7 @@ Dashboard panel – overview of all profiles with quick-sync cards.
 from __future__ import annotations
 
 from datetime import datetime
+from tkinter import messagebox
 from typing import TYPE_CHECKING, Dict, List
 
 import customtkinter as ctk
@@ -21,7 +22,7 @@ class ProfileCard(GlassCard):
 
     def __init__(self, master, profile, app: "QueekSyncApp", **kw) -> None:
         kw.setdefault("width", 300)
-        kw.setdefault("height", 204)
+        kw.setdefault("height", 224)
         super().__init__(master, **kw)
         self.grid_propagate(False)
         self.pack_propagate(False)
@@ -129,7 +130,8 @@ class ProfileCard(GlassCard):
 
         # Buttons
         btn_frame = ctk.CTkFrame(content, fg_color="transparent")
-        btn_frame.grid(row=4, column=0, sticky="sw", pady=(10, 0))
+        btn_frame.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+        btn_frame.grid_columnconfigure(0, weight=1)
 
         sync_btn = PrimaryButton(
             btn_frame,
@@ -138,17 +140,20 @@ class ProfileCard(GlassCard):
             font=ctk.CTkFont(size=12, weight="bold"),
             command=self._sync,
         )
-        sync_btn.pack(side="left", padx=(0, 6))
+        sync_btn.grid(row=0, column=0, sticky="ew")
         attach_tooltip(
             sync_btn,
             text="Start this profile immediately. Example: use this after dropping new files into the source folder and wanting the destination updated now."
         )
 
+        actions = ctk.CTkFrame(btn_frame, fg_color="transparent")
+        actions.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+
         compare_btn = ctk.CTkButton(
-            btn_frame,
+            actions,
             text="≋  Compare",
-            height=30,
-            width=96,
+            height=28,
+            width=110,
             corner_radius=T.RADIUS_MD,
             font=ctk.CTkFont(size=12),
             fg_color="transparent",
@@ -164,25 +169,27 @@ class ProfileCard(GlassCard):
             text="Compare source vs destination and report which side looks more up-to-date. Example: use this when you forgot which computer you edited on last."
         )
 
-        edit_btn = ctk.CTkButton(
-            btn_frame,
-            text="✎  Edit",
-            height=30,
-            width=70,
-            corner_radius=T.RADIUS_MD,
-            font=ctk.CTkFont(size=12),
-            fg_color="transparent",
-            hover_color=T.BG_HOVER,
-            text_color=T.TEXT_MUTED,
-            border_color=T.BORDER,
-            border_width=1,
-            command=self._edit,
-        )
-        edit_btn.pack(side="left")
-        attach_tooltip(
-            edit_btn,
-            text="Open this profile in the editor. Example: use this to change folders, credentials, filters, or schedule settings from the dashboard card."
-        )
+        for label, cmd, tip in [
+            ("✎", self._edit, "Open this profile in the editor. Example: use this to change folders, credentials, filters, or schedule settings."),
+            ("⧉", self._duplicate, "Create a copy of this profile. Example: duplicate a working profile, then adjust only the destination."),
+            ("✕", self._delete, "Delete this profile permanently. Example: use this only when you no longer need the sync definition."),
+        ]:
+            btn = ctk.CTkButton(
+                actions,
+                text=label,
+                width=32,
+                height=28,
+                corner_radius=T.RADIUS_SM,
+                font=ctk.CTkFont(size=13),
+                fg_color="transparent" if label != "✕" else "#450a0a",
+                hover_color=T.BG_HOVER if label != "✕" else "#7f1d1d",
+                text_color=T.TEXT_MUTED if label != "✕" else T.ERROR,
+                border_color=T.BORDER if label != "✕" else T.ERROR,
+                border_width=1,
+                command=cmd,
+            )
+            btn.pack(side="left", padx=(0, 6))
+            attach_tooltip(btn, text=tip)
 
     def _sync(self) -> None:
         self._app.start_sync(self._profile.id)
@@ -198,6 +205,28 @@ class ProfileCard(GlassCard):
             on_save=self._on_save,
         )
         dlg.focus()
+
+    def _duplicate(self) -> None:
+        try:
+            self._app.profile_mgr.duplicate_profile(self._profile.id)
+            self._app.refresh_panel("dashboard")
+            self._app.refresh_panel("profiles")
+        except ValueError as exc:
+            messagebox.showerror("Error", str(exc), parent=self._app.root)
+
+    def _delete(self) -> None:
+        if not messagebox.askyesno(
+            "Delete Profile",
+            f"Delete profile  '{self._profile.name}'?\nThis cannot be undone.",
+            icon="warning",
+            parent=self._app.root,
+        ):
+            return
+        self._app._scheduler.remove_profile(self._profile.id)
+        self._app._watcher_mgr.remove(self._profile.id)
+        self._app.profile_mgr.delete(self._profile.id)
+        self._app.refresh_panel("dashboard")
+        self._app.refresh_panel("profiles")
 
     def _on_save(self, profile) -> None:
         self._app.profile_mgr.save(profile)
