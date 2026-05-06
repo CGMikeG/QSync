@@ -141,9 +141,13 @@ class SettingsPanel(ctk.CTkFrame):
         stor_card.grid(row=5, column=0, sticky="ew", pady=(0, T.PAD_MD))
         stor_card.grid_columnconfigure(0, weight=1)
 
+        log_path = self._app.get_log_file_path()
         storage_label = ctk.CTkLabel(
             stor_card,
-            text=f"Profiles directory:\n{self._app.profile_mgr.directory}",
+            text=(
+                f"Profiles directory:\n{self._app.profile_mgr.directory}\n\n"
+                + (f"Log file:\n{log_path}" if log_path else "Log file:\n(disabled or unavailable)")
+            ),
             font=ctk.CTkFont(size=12),
             text_color=T.TEXT_MUTED,
             justify="left",
@@ -168,6 +172,27 @@ class SettingsPanel(ctk.CTkFrame):
             storage_label,
             open_dir_btn,
             text="This is where profile configuration files are stored on disk. Example: open this folder to back up profiles manually or inspect the saved profile files."
+        )
+
+        open_log_btn = ctk.CTkButton(
+            stor_card,
+            text="Open Log File",
+            height=30,
+            width=180,
+            corner_radius=T.RADIUS_SM,
+            fg_color="transparent",
+            hover_color=T.BG_HOVER,
+            text_color=T.ACCENT,
+            border_color=T.ACCENT,
+            border_width=1,
+            command=self._open_log_file,
+        )
+        open_log_btn.grid(row=2, column=0, sticky="w", padx=T.PAD_MD, pady=(0, T.PAD_MD))
+        if not log_path:
+            open_log_btn.configure(state="disabled")
+        attach_tooltip(
+            open_log_btn,
+            text="Open the log.txt file that captures sync errors and progress. Example: use this after a failed sync to copy/paste the error details.",
         )
 
         # ---- About ---------------------------------------------------
@@ -236,6 +261,25 @@ class SettingsPanel(ctk.CTkFrame):
         import sys
 
         path = self._app.profile_mgr.directory
+        try:
+            if sys.platform == "win32":
+                os.startfile(path)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", path])
+            else:
+                subprocess.Popen(["xdg-open", path])
+        except Exception as exc:
+            from tkinter import messagebox
+            messagebox.showerror("Error", str(exc))
+
+    def _open_log_file(self) -> None:
+        import os
+        import subprocess
+        import sys
+
+        path = self._app.get_log_file_path()
+        if not path:
+            return
         try:
             if sys.platform == "win32":
                 os.startfile(path)

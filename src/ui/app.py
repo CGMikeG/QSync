@@ -8,8 +8,10 @@ import getpass
 import queue
 import shutil
 import subprocess
+import os
 import sys
 import threading
+from pathlib import Path
 from typing import Callable, Dict, Optional
 
 import customtkinter as ctk
@@ -59,6 +61,9 @@ class QueekSyncApp:
         # ---- shared runtime state ---------------------------------
         self._engines: Dict[str, SyncEngine] = {}   # profile_id → engine
         self._event_queue: queue.Queue[SyncEvent] = queue.Queue()
+        self._log_file_path: str = ""
+        self._log_fh = None
+        self._init_file_logging()
 
         # ---- background services ----------------------------------
         self._scheduler = SyncScheduler(on_trigger=self._schedule_trigger)
@@ -358,6 +363,7 @@ class QueekSyncApp:
             self.root.after(100, self._pump_events)
 
     def _dispatch_event(self, event: SyncEvent) -> None:
+        self._log_event_to_file(event)
         # Forward to monitor panel if it exists
         if "monitor" in self._panels:
             self._panels["monitor"].on_sync_event(event)  # type: ignore[attr-defined]
@@ -377,7 +383,64 @@ class QueekSyncApp:
 
         self._scheduler.stop()
         self._watcher_mgr.stop_all()
+        try:
+            if self._log_fh:
+                self._log_fh.close()
+        except Exception:
+            pass
         self.root.destroy()
+
+    def get_log_file_path(self) -> str:
+        return self._log_file_path
+
+    def _init_file_logging(self) -> None:
+        cfg = self.config_mgr.config
+        if not cfg.log_to_file:
+            return
+
+        try:
+            if os.name == "nt":
+                base = os.environ.get("APPDATA", os.path.expanduser("~"))
+                log_dir = Path(base) / "QueekSync"
+            else:
+                base = os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share"))
+                log_dir = Path(base) / "QueekSync"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            self._log_file_path = str(log_dir / "log.txt")
+            self._log_fh = open(self._log_file_path, "a", encoding="utf-8")
+        except Exception:
+            self._log_file_path = ""
+            self._log_fh = None
+
+    def _log_event_to_file(self, event: SyncEvent) -> None:
+        cfg = self.config_mgr.config
+        if not cfg.log_to_file or not self._log_fh:
+            return
+
+        level_map = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40}
+        min_level = level_map.get(str(cfg.log_level).upper(), 20)
+        kind_level = 20
+        if event.kind == "warning":
+            kind_level = 30
+        elif event.kind == "error":
+            kind_level = 40
+
+        if kind_level < min_level:
+            return
+
+        pid = getattr(event, "_profile_id", "unknown")
+        profile = self.profile_mgr.get(pid)
+        pname = profile.name if profile else pid[:8]
+        ts = event.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+        msg = event.message.replace("\n", " ").strip()
+        rel = event.rel_path.strip()
+        suffix = f" | {rel}" if rel else ""
+        line = f"[{ts}] [{pname}] [{event.kind.upper()}] {msg}{suffix}\n"
+        try:
+            self._log_fh.write(line)
+            self._log_fh.flush()
+        except Exception:
+            pass
 
     # ==================================================================
     # Windows DWM glass
