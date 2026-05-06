@@ -210,6 +210,10 @@ class LocalFS:
         return file_info.checksum()
 
     @staticmethod
+    def exists(path: str) -> bool:
+        return os.path.exists(path)
+
+    @staticmethod
     def copy_file(
         src: str,
         dst: str,
@@ -409,6 +413,13 @@ class SFTPFS:
                 h.update(chunk)
         return h.hexdigest()
 
+    def exists(self, path: str) -> bool:
+        try:
+            self._sftp.stat(path)
+            return True
+        except Exception:
+            return False
+
     def upload(
         self,
         local: str,
@@ -514,6 +525,34 @@ class SyncEngine:
             self.event_cb(
                 SyncEvent(kind, message, rel_path, progress, bytes_done, bytes_total)
             )
+
+    def _safe_transfer(self, src_fs, src_abs: str, dst_fs, dst_abs: str, preserve_ts: bool, rel: str) -> None:
+        try:
+            self._transfer(src_fs, src_abs, dst_fs, dst_abs, preserve_ts)
+        except Exception as exc:
+            errno = getattr(exc, "errno", None)
+            if errno is None and getattr(exc, "args", None):
+                try:
+                    errno = int(exc.args[0])
+                except Exception:
+                    errno = None
+
+            missing = errno == 2
+            if missing:
+                src_exists = True
+                try:
+                    src_exists = src_fs.exists(src_abs)
+                except Exception:
+                    src_exists = True
+
+                if not src_exists:
+                    self._emit("skip", f"Skipping {rel} (source missing)", rel)
+                    return
+
+                self._emit("error", f"Copy failed [{rel}]: {exc}", rel)
+                return
+
+            self._emit("error", f"Copy failed [{rel}]: {exc}", rel)
 
     # ------------------------------------------------------------------
     def _run(self) -> None:
@@ -756,10 +795,7 @@ class SyncEngine:
                 src_abs = src_f.abs_path
                 dst_abs = self._join(dst_cfg, rel)
                 self._emit("copy", f"Copying {rel} ({reason})", rel, done / max(total, 1))
-                try:
-                    self._transfer(src_fs, src_abs, dst_fs, dst_abs, opts.preserve_timestamps)
-                except Exception as exc:
-                    self._emit("error", f"Copy failed [{rel}]: {exc}", rel)
+                self._safe_transfer(src_fs, src_abs, dst_fs, dst_abs, opts.preserve_timestamps, rel)
             else:
                 self._emit("skip", f"Skipping {rel} (up-to-date)", rel, done / max(total, 1))
 
@@ -798,17 +834,11 @@ class SyncEngine:
             if direction == "src_to_dst" and src_f is not None:
                 dst_abs = self._join(dst_cfg, rel)
                 self._emit("copy", f"Copying {rel} to destination ({reason})", rel, done / max(total, 1))
-                try:
-                    self._transfer(src_fs, src_f.abs_path, dst_fs, dst_abs, opts.preserve_timestamps)
-                except Exception as exc:
-                    self._emit("error", f"Two-way copy failed [{rel}]: {exc}", rel)
+                self._safe_transfer(src_fs, src_f.abs_path, dst_fs, dst_abs, opts.preserve_timestamps, rel)
             elif direction == "dst_to_src" and dst_f is not None:
                 src_abs = self._join(src_cfg, rel)
                 self._emit("copy", f"Copying {rel} to source ({reason})", rel, done / max(total, 1))
-                try:
-                    self._transfer(dst_fs, dst_f.abs_path, src_fs, src_abs, opts.preserve_timestamps)
-                except Exception as exc:
-                    self._emit("error", f"Two-way copy failed [{rel}]: {exc}", rel)
+                self._safe_transfer(dst_fs, dst_f.abs_path, src_fs, src_abs, opts.preserve_timestamps, rel)
             else:
                 self._emit("skip", f"Skipping {rel} (already matched)", rel, done / max(total, 1))
 
