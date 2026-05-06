@@ -215,6 +215,22 @@ class QueekSyncApp:
         # Navigate to monitor
         self.navigate("monitor")
 
+    def start_compare(self, profile_id: str) -> None:
+        profile = self.profile_mgr.get(profile_id)
+        if profile is None:
+            return
+        if profile_id in self._engines and self._engines[profile_id].is_running():
+            return
+
+        def _cb(event: SyncEvent) -> None:
+            self._event_queue.put(event)
+            event._profile_id = profile_id  # type: ignore[attr-defined]
+
+        engine = SyncEngine(profile, event_cb=_cb, compare_only=True)
+        self._engines[profile_id] = engine
+        engine.start(blocking=False)
+        self.navigate("monitor")
+
     def cancel_sync(self, profile_id: str) -> None:
         engine = self._engines.get(profile_id)
         if engine:

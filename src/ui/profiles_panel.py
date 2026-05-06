@@ -88,6 +88,7 @@ class ProfileRow(GlassCard):
 
         for label, cmd, fg, hover, tip in [
             ("▶", self._sync,      T.ACCENT,    T.ACCENT_HOVER, "Run this profile immediately. Example: click this after updating source files and wanting a manual sync right now."),
+            ("≋", self._compare,   T.BG_CARD,   T.BG_HOVER, "Compare source vs destination and show which side looks more up-to-date. Example: use this when you forgot which machine you edited on last."),
             ("✎", self._edit,      T.BG_CARD,   T.BG_HOVER, "Open the full editor for this profile. Example: use this to change paths, filters, schedule, or sync mode."),
             ("⧉", self._duplicate, T.BG_CARD,   T.BG_HOVER, "Create a copy of this profile. Example: duplicate a working backup profile, then adjust only the destination."),
             ("✕", self._delete,    "#450a0a",   "#7f1d1d", "Delete this profile permanently. Example: use this only when you no longer need the sync definition."),
@@ -113,6 +114,9 @@ class ProfileRow(GlassCard):
 
     def _sync(self) -> None:
         self._app.start_sync(self._profile.id)
+
+    def _compare(self) -> None:
+        self._app.start_compare(self._profile.id)
 
     def _edit(self) -> None:
         from ui.profile_editor import ProfileEditorDialog

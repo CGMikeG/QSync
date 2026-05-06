@@ -144,6 +144,26 @@ class ProfileCard(GlassCard):
             text="Start this profile immediately. Example: use this after dropping new files into the source folder and wanting the destination updated now."
         )
 
+        compare_btn = ctk.CTkButton(
+            btn_frame,
+            text="≋  Compare",
+            height=30,
+            width=96,
+            corner_radius=T.RADIUS_MD,
+            font=ctk.CTkFont(size=12),
+            fg_color="transparent",
+            hover_color=T.BG_HOVER,
+            text_color=T.TEXT_MUTED,
+            border_color=T.BORDER,
+            border_width=1,
+            command=self._compare,
+        )
+        compare_btn.pack(side="left", padx=(0, 6))
+        attach_tooltip(
+            compare_btn,
+            text="Compare source vs destination and report which side looks more up-to-date. Example: use this when you forgot which computer you edited on last."
+        )
+
         edit_btn = ctk.CTkButton(
             btn_frame,
             text="✎  Edit",
@@ -166,6 +186,9 @@ class ProfileCard(GlassCard):
 
     def _sync(self) -> None:
         self._app.start_sync(self._profile.id)
+
+    def _compare(self) -> None:
+        self._app.start_compare(self._profile.id)
 
     def _edit(self) -> None:
         from ui.profile_editor import ProfileEditorDialog

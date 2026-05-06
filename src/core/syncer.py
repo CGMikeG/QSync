@@ -474,9 +474,11 @@ class SyncEngine:
         self,
         profile,
         event_cb: Optional[Callable[[SyncEvent], None]] = None,
+        compare_only: bool = False,
     ) -> None:
         self.profile = profile
         self.event_cb = event_cb
+        self._compare_only = compare_only
         self.status = SyncStatus.IDLE
         self._cancel = False
         self._thread: Optional[threading.Thread] = None
@@ -517,7 +519,8 @@ class SyncEngine:
     def _run(self) -> None:
         self.status = SyncStatus.SCANNING
         try:
-            self._emit("info", f"Starting: {self.profile.name}")
+            run_label = "Compare" if self._compare_only else "Sync"
+            self._emit("info", f"Starting: {self.profile.name} ({run_label})")
             src_cfg = self.profile.source
             dst_cfg = self.profile.destination
 
@@ -543,18 +546,21 @@ class SyncEngine:
 
             if self._cancel:
                 self.status = SyncStatus.CANCELLED
-                self._emit("warning", "Sync cancelled by user.")
-                self.profile.last_sync_status = "cancelled"
+                self._emit("warning", f"{run_label} cancelled by user.")
+                if not self._compare_only:
+                    self.profile.last_sync_status = "cancelled"
             else:
                 self.status = SyncStatus.COMPLETED
-                self._emit("success", "Sync completed successfully.")
-                self.profile.last_sync = datetime.now().isoformat()
-                self.profile.last_sync_status = "success"
+                self._emit("success", f"{run_label} completed successfully.")
+                if not self._compare_only:
+                    self.profile.last_sync = datetime.now().isoformat()
+                    self.profile.last_sync_status = "success"
 
         except Exception as exc:
             self.status = SyncStatus.ERROR
-            self._emit("error", f"Sync failed: {exc}")
-            self.profile.last_sync_status = "error"
+            self._emit("error", f"{run_label} failed: {exc}")
+            if not self._compare_only:
+                self.profile.last_sync_status = "error"
 
     # ------------------------------------------------------------------
     def _make_fs(self, cfg):
@@ -569,7 +575,10 @@ class SyncEngine:
         opts = self.profile.options
         flt = self.profile.filters
 
-        # ---- scan -------------------------------------------------
+        if self._compare_only:
+            self._compare_only_run(src_fs, src_cfg, dst_fs, dst_cfg, flt.include_patterns, flt.exclude_patterns, opts)
+            return
+
         self._emit("info", "Scanning source …")
         src_files = src_fs.scan(
             src_cfg.path,
@@ -621,6 +630,106 @@ class SyncEngine:
                     dst_fs.delete(dst_abs, dst_f.is_dir)
                 except Exception as exc:
                     self._emit("error", f"Delete failed [{rel}]: {exc}", rel)
+
+    def _compare_only_run(self, src_fs, src_cfg, dst_fs, dst_cfg, include_patterns, exclude_patterns, opts) -> None:
+        self._emit("info", "Scanning source …")
+        src_files = src_fs.scan(
+            src_cfg.path,
+            include_patterns,
+            exclude_patterns,
+            opts.follow_symlinks,
+            progress_cb=lambda rel: self._emit("info", f"Scanning source: {rel}", rel),
+        )
+        if self._cancel:
+            return
+
+        self._emit("info", "Scanning destination …")
+        try:
+            dst_files = dst_fs.scan(
+                dst_cfg.path,
+                include_patterns,
+                exclude_patterns,
+                opts.follow_symlinks,
+                progress_cb=lambda rel: self._emit("info", f"Scanning destination: {rel}", rel),
+            )
+        except FileNotFoundError:
+            dst_files = []
+        if self._cancel:
+            return
+
+        src_map: Dict[str, FileInfo] = {f.rel_path: f for f in src_files if not f.is_dir}
+        dst_map: Dict[str, FileInfo] = {f.rel_path: f for f in dst_files if not f.is_dir}
+        paths = sorted(set(src_map.keys()) | set(dst_map.keys()))
+
+        self.status = SyncStatus.SYNCING
+        self._emit("info", f"Found {len(src_map)} file(s) in source, {len(dst_map)} file(s) in destination.")
+
+        counts = {
+            "same": 0,
+            "src_only": 0,
+            "dst_only": 0,
+            "src_newer": 0,
+            "dst_newer": 0,
+            "conflict": 0,
+        }
+        newest_src = max((f.mtime for f in src_map.values()), default=0.0)
+        newest_dst = max((f.mtime for f in dst_map.values()), default=0.0)
+
+        total = len(paths)
+        for idx, rel in enumerate(paths, start=1):
+            if self._cancel:
+                return
+            self._emit("compare", f"Comparing {rel}", rel, (idx - 1) / max(total, 1))
+
+            src_f = src_map.get(rel)
+            dst_f = dst_map.get(rel)
+            status = self._compare_pair_status(src_fs, src_f, dst_fs, dst_f, opts)
+            counts[status] += 1
+
+        self._emit("info", f"Same: {counts['same']}")
+        self._emit("info", f"Source newer: {counts['src_newer']}  |  Destination newer: {counts['dst_newer']}")
+        self._emit("info", f"Only in source: {counts['src_only']}  |  Only in destination: {counts['dst_only']}")
+        if counts["conflict"]:
+            self._emit("warning", f"Conflicts (same timestamp but different content/size): {counts['conflict']}")
+
+        newest_src_txt = datetime.fromtimestamp(newest_src).strftime("%Y-%m-%d %H:%M:%S") if newest_src else "n/a"
+        newest_dst_txt = datetime.fromtimestamp(newest_dst).strftime("%Y-%m-%d %H:%M:%S") if newest_dst else "n/a"
+        self._emit("info", f"Latest file change seen — source: {newest_src_txt} | destination: {newest_dst_txt}")
+
+        src_score = counts["src_newer"] + counts["src_only"]
+        dst_score = counts["dst_newer"] + counts["dst_only"]
+        if src_score > dst_score:
+            self._emit("info", "Recommendation: source appears more up-to-date overall.")
+        elif dst_score > src_score:
+            self._emit("info", "Recommendation: destination appears more up-to-date overall.")
+        else:
+            self._emit("info", "Recommendation: both sides look equally up-to-date overall (or mixed).")
+
+        self._emit("info", f"Progress: {total}/{total}", progress=1.0)
+
+    @staticmethod
+    def _compare_pair_status(src_fs, src: Optional[FileInfo], dst_fs, dst: Optional[FileInfo], opts) -> str:
+        if src is None and dst is None:
+            return "same"
+        if src is None:
+            return "dst_only"
+        if dst is None:
+            return "src_only"
+
+        if src.size == dst.size and abs(src.mtime - dst.mtime) <= 2:
+            return "same"
+        if src.mtime > dst.mtime + 2:
+            return "src_newer"
+        if dst.mtime > src.mtime + 2:
+            return "dst_newer"
+
+        if opts.verify_checksums:
+            try:
+                if src_fs.checksum(src) == dst_fs.checksum(dst):
+                    return "same"
+            except Exception:
+                pass
+        return "conflict"
 
     def _sync_one_way(self, src_fs, src_map, dst_fs, dst_cfg, dst_map, opts) -> None:
         file_entries = [(rel, src_f) for rel, src_f in src_map.items() if not src_f.is_dir]

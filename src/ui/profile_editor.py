@@ -1,4 +1,4 @@
-﻿"""
+"""
 Profile editor dialog – tabbed form for creating / editing a sync profile.
 """
 
@@ -913,4 +913,3 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             "Copied the recommended Linux permission commands to the clipboard.",
             parent=self,
         )
-
