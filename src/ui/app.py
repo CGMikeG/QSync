@@ -63,7 +63,7 @@ class QueekSyncApp:
         self._event_queue: queue.Queue[SyncEvent] = queue.Queue()
         self._log_file_path: str = ""
         self._log_fh = None
-        self._init_file_logging()
+        self.refresh_file_logging()
 
         # ---- background services ----------------------------------
         self._scheduler = SyncScheduler(on_trigger=self._schedule_trigger)
@@ -393,24 +393,37 @@ class QueekSyncApp:
     def get_log_file_path(self) -> str:
         return self._log_file_path
 
-    def _init_file_logging(self) -> None:
+    def refresh_file_logging(self) -> None:
         cfg = self.config_mgr.config
+        self._log_file_path = self._compute_log_file_path()
+
+        try:
+            if self._log_fh:
+                self._log_fh.close()
+        except Exception:
+            pass
+        self._log_fh = None
+
         if not cfg.log_to_file:
             return
 
         try:
-            if os.name == "nt":
-                base = os.environ.get("APPDATA", os.path.expanduser("~"))
-                log_dir = Path(base) / "QueekSync"
-            else:
-                base = os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share"))
-                log_dir = Path(base) / "QueekSync"
+            log_dir = Path(self._log_file_path).parent
             log_dir.mkdir(parents=True, exist_ok=True)
-            self._log_file_path = str(log_dir / "log.txt")
             self._log_fh = open(self._log_file_path, "a", encoding="utf-8")
+            self._log_fh.flush()
         except Exception:
-            self._log_file_path = ""
             self._log_fh = None
+
+    @staticmethod
+    def _compute_log_file_path() -> str:
+        if os.name == "nt":
+            base = os.environ.get("APPDATA", os.path.expanduser("~"))
+            log_dir = Path(base) / "QueekSync"
+        else:
+            base = os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share"))
+            log_dir = Path(base) / "QueekSync"
+        return str(log_dir / "log.txt")
 
     def _log_event_to_file(self, event: SyncEvent) -> None:
         cfg = self.config_mgr.config

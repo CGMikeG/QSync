@@ -251,9 +251,11 @@ class SettingsPanel(ctk.CTkFrame):
         cfg.log_to_file = self._log_file_var.get()
         cfg.log_level = self._log_level_var.get()
         self._app.config_mgr.save()
+        self._app.refresh_file_logging()
+        self._app.refresh_panel("settings")
 
         from tkinter import messagebox
-        messagebox.showinfo("Settings", "Settings saved successfully.")
+        messagebox.showinfo("Settings", "Settings saved successfully.", parent=self._app.root)
 
     def _open_profiles_dir(self) -> None:
         import os
