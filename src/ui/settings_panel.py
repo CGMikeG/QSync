@@ -205,7 +205,7 @@ class SettingsPanel(ctk.CTkFrame):
         ctk.CTkLabel(
             about_card,
             text=(
-                "QueekSync  v1.0\n"
+                "QueekSync\n"
                 "Cross-platform file synchronisation with glass UI.\n\n"
                 "Supports local and SFTP (SSH) endpoints.\n"
                 "Built with Python · customtkinter · paramiko · watchdog"

@@ -372,9 +372,15 @@ class QueekSyncApp:
         # Forward to monitor panel if it exists
         if "monitor" in self._panels:
             self._panels["monitor"].on_sync_event(event)  # type: ignore[attr-defined]
-        # Refresh dashboard card when sync finishes
-        if event.kind in ("success", "error", "warning") and "dashboard" in self._panels:
-            self._panels["dashboard"].refresh()  # type: ignore[attr-defined]
+        # Persist last_sync / last_sync_status and refresh dashboard when sync finishes
+        if event.kind in ("success", "error", "warning"):
+            pid = getattr(event, "_profile_id", None)
+            if pid:
+                profile = self.profile_mgr.get(pid)
+                if profile:
+                    self.profile_mgr.save(profile)
+            if "dashboard" in self._panels:
+                self._panels["dashboard"].refresh()  # type: ignore[attr-defined]
 
     # ==================================================================
     # Window close

@@ -60,13 +60,6 @@ class Sidebar(ctk.CTkFrame):
             text_color=T.TEXT,
         ).pack(side="left", padx=(6, 0))
 
-        ctk.CTkLabel(
-            logo_frame,
-            text=" v1.0",
-            font=ctk.CTkFont(size=11),
-            text_color=T.TEXT_DIM,
-        ).pack(side="left", pady=(6, 0))
-
         Separator(self).pack(fill="x", padx=T.PAD_MD, pady=(0, T.PAD_SM))
 
         # Navigation buttons
