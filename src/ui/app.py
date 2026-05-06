@@ -10,16 +10,15 @@ import shutil
 import subprocess
 import os
 import sys
-import threading
 from pathlib import Path
-from typing import Callable, Dict, Optional
+from typing import Dict, Optional
 
 import customtkinter as ctk
 
 from core.config import ConfigManager
 from core.profile import ProfileManager, get_delete_permission_issue
 from core.scheduler import SyncScheduler
-from core.syncer import SyncEngine, SyncEvent, SyncStatus
+from core.syncer import SyncEngine, SyncEvent
 from core.watcher import WatcherManager
 from ui import theme as T
 from ui.sidebar import Sidebar
@@ -206,9 +205,9 @@ class QueekSyncApp:
                 return
 
         def _cb(event: SyncEvent) -> None:
-            self._event_queue.put(event)
-            # Also tag with profile_id for the monitor panel
             event._profile_id = profile_id  # type: ignore[attr-defined]
+            self._log_event_to_file(event)
+            self._event_queue.put(event)
 
         profile.last_sync_status = "running"
         self.profile_mgr.save(profile)
@@ -228,8 +227,9 @@ class QueekSyncApp:
             return
 
         def _cb(event: SyncEvent) -> None:
-            self._event_queue.put(event)
             event._profile_id = profile_id  # type: ignore[attr-defined]
+            self._log_event_to_file(event)
+            self._event_queue.put(event)
 
         engine = SyncEngine(profile, event_cb=_cb, compare_only=True)
         self._engines[profile_id] = engine
@@ -240,6 +240,11 @@ class QueekSyncApp:
         engine = self._engines.get(profile_id)
         if engine:
             engine.cancel()
+
+    def toggle_pause_sync(self, profile_id: str) -> None:
+        engine = self._engines.get(profile_id)
+        if engine:
+            engine.toggle_pause()
 
     def get_engine(self, profile_id: str) -> Optional[SyncEngine]:
         return self._engines.get(profile_id)
@@ -340,6 +345,7 @@ class QueekSyncApp:
             return
         event = SyncEvent("error", message)
         event._profile_id = profile_id  # type: ignore[attr-defined]
+        self._log_event_to_file(event)
         self._event_queue.put(event)
 
         if interactive:
@@ -363,7 +369,6 @@ class QueekSyncApp:
             self.root.after(100, self._pump_events)
 
     def _dispatch_event(self, event: SyncEvent) -> None:
-        self._log_event_to_file(event)
         # Forward to monitor panel if it exists
         if "monitor" in self._panels:
             self._panels["monitor"].on_sync_event(event)  # type: ignore[attr-defined]
@@ -394,7 +399,6 @@ class QueekSyncApp:
         return self._log_file_path
 
     def refresh_file_logging(self) -> None:
-        cfg = self.config_mgr.config
         self._log_file_path = self._compute_log_file_path()
 
         try:
@@ -404,13 +408,13 @@ class QueekSyncApp:
             pass
         self._log_fh = None
 
-        if not cfg.log_to_file:
-            return
-
         try:
             log_dir = Path(self._log_file_path).parent
             log_dir.mkdir(parents=True, exist_ok=True)
             self._log_fh = open(self._log_file_path, "a", encoding="utf-8")
+            if os.path.getsize(self._log_file_path) == 0:
+                started = Path(sys.argv[0]).name or "QueekSync"
+                self._log_fh.write(f"[{Path(self._log_file_path).name}] Logging started for {started}\n")
             self._log_fh.flush()
         except Exception:
             self._log_fh = None
@@ -427,7 +431,7 @@ class QueekSyncApp:
 
     def _log_event_to_file(self, event: SyncEvent) -> None:
         cfg = self.config_mgr.config
-        if not cfg.log_to_file or not self._log_fh:
+        if not self._log_fh:
             return
 
         level_map = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40}

@@ -85,6 +85,7 @@ class SyncOptions:
     follow_symlinks: bool = False
     verify_checksums: bool = False
     bandwidth_limit_kbps: int = 0       # 0 = unlimited
+    use_rsync_ssh: bool = False         # prefer rsync over SSH for local<->remote syncs when available
 
     def to_dict(self) -> dict:
         return asdict(self)

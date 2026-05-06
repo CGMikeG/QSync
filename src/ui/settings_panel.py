@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 import customtkinter as ctk
 
 from ui import theme as T
-from ui.components import GlassCard, PrimaryButton, Separator, attach_tooltip
+from ui.components import GlassCard, PrimaryButton, attach_tooltip
 
 if TYPE_CHECKING:
     from ui.app import QueekSyncApp
@@ -85,7 +85,7 @@ class SettingsPanel(ctk.CTkFrame):
         for row_i, (attr, label) in enumerate([
             ("_notif_var",    "Show desktop notifications"),
             ("_minimized_var","Start minimized"),
-            ("_log_file_var", "Write logs to file"),
+            ("_log_file_var", "Always write logs to file"),
         ]):
             box = ctk.CTkCheckBox(
                 beh_card,
@@ -97,10 +97,13 @@ class SettingsPanel(ctk.CTkFrame):
                 text_color=T.TEXT,
             )
             box.grid(row=row_i, column=0, sticky="w", padx=T.PAD_MD, pady=(T.PAD_SM if row_i == 0 else T.PAD_XS, T.PAD_XS))
+            if attr == "_log_file_var":
+                box.select()
+                box.configure(state="disabled")
             tip_map = {
                 "_notif_var": "Show operating-system notifications for sync results. Example: enable this if you want a quick desktop alert when scheduled backups finish or fail.",
                 "_minimized_var": "Launch the app minimized instead of opening the full window immediately. Example: turn this on if QueekSync starts with your desktop session and you only check it occasionally.",
-                "_log_file_var": "Save runtime logs to disk for later troubleshooting. Example: enable this before testing a flaky SFTP connection so you have a log file to review.",
+                "_log_file_var": "QueekSync now always writes runtime logs to disk for troubleshooting. Example: open log.txt after a failed sync to see the exact path and error details.",
             }
             attach_tooltip(box, text=tip_map[attr])
 
@@ -188,8 +191,6 @@ class SettingsPanel(ctk.CTkFrame):
             command=self._open_log_file,
         )
         open_log_btn.grid(row=2, column=0, sticky="w", padx=T.PAD_MD, pady=(0, T.PAD_MD))
-        if not log_path:
-            open_log_btn.configure(state="disabled")
         attach_tooltip(
             open_log_btn,
             text="Open the log.txt file that captures sync errors and progress. Example: use this after a failed sync to copy/paste the error details.",
@@ -248,7 +249,7 @@ class SettingsPanel(ctk.CTkFrame):
         cfg.theme = self._theme_var.get()
         cfg.show_notifications = self._notif_var.get()
         cfg.start_minimized = self._minimized_var.get()
-        cfg.log_to_file = self._log_file_var.get()
+        cfg.log_to_file = True
         cfg.log_level = self._log_level_var.get()
         self._app.config_mgr.save()
         self._app.refresh_file_logging()

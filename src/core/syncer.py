@@ -18,8 +18,12 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import os
+import shlex
+import signal
 import stat
+import subprocess
 import shutil
+import time
 import tempfile
 import threading
 from datetime import datetime
@@ -62,6 +66,19 @@ class SyncEvent:
 
     def __repr__(self) -> str:  # noqa: D105
         return f"[{self.kind.upper()}] {self.message}"
+
+
+class SyncCancelled(Exception):
+    """Raised to abort a running sync immediately."""
+
+
+def _apply_bandwidth_limit(started_at: float, bytes_done: int, limit_kbps: int) -> None:
+    if limit_kbps <= 0:
+        return
+    expected_elapsed = bytes_done / float(limit_kbps * 1024)
+    actual_elapsed = time.monotonic() - started_at
+    if expected_elapsed > actual_elapsed:
+        time.sleep(expected_elapsed - actual_elapsed)
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +127,8 @@ class LocalFS:
         exclude_patterns: List[str],
         follow_symlinks: bool = False,
         progress_cb: Optional[Callable[[str], None]] = None,
+        cancel_cb: Optional[Callable[[], bool]] = None,
+        pause_cb: Optional[Callable[[], None]] = None,
     ) -> List[FileInfo]:
         root_path = os.path.abspath(root)
         if not os.path.exists(root_path):
@@ -117,6 +136,10 @@ class LocalFS:
 
         files: List[FileInfo] = []
         for dirpath, dirnames, filenames in os.walk(root_path, followlinks=follow_symlinks):
+            if pause_cb:
+                pause_cb()
+            if cancel_cb and cancel_cb():
+                raise SyncCancelled()
             # Filter out excluded directories in-place
             dirnames[:] = [
                 d for d in dirnames
@@ -130,6 +153,10 @@ class LocalFS:
                 and (follow_symlinks or not os.path.islink(os.path.join(dirpath, d)))
             ]
             for name in filenames:
+                if pause_cb:
+                    pause_cb()
+                if cancel_cb and cancel_cb():
+                    raise SyncCancelled()
                 full = os.path.join(dirpath, name)
                 rel = os.path.relpath(full, root_path).replace("\\", "/")
                 if LocalFS._excluded(name, exclude_patterns, include_patterns, rel, is_dir=False):
@@ -146,6 +173,10 @@ class LocalFS:
 
             # Also record directories
             for name in dirnames:
+                if pause_cb:
+                    pause_cb()
+                if cancel_cb and cancel_cb():
+                    raise SyncCancelled()
                 full = os.path.join(dirpath, name)
                 rel = os.path.relpath(full, root_path).replace("\\", "/")
                 try:
@@ -219,12 +250,20 @@ class LocalFS:
         dst: str,
         preserve_timestamps: bool = True,
         progress_cb: Optional[Callable[[int, int], None]] = None,
+        cancel_cb: Optional[Callable[[], bool]] = None,
+        pause_cb: Optional[Callable[[], None]] = None,
+        bandwidth_limit_kbps: int = 0,
     ) -> None:
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         total = os.path.getsize(src)
         done = 0
+        started_at = time.monotonic()
         with open(src, "rb") as fsrc, open(dst, "wb") as fdst:
             while True:
+                if pause_cb:
+                    pause_cb()
+                if cancel_cb and cancel_cb():
+                    raise SyncCancelled()
                 chunk = fsrc.read(1 << 20)  # 1 MiB
                 if not chunk:
                     break
@@ -232,6 +271,7 @@ class LocalFS:
                 done += len(chunk)
                 if progress_cb:
                     progress_cb(done, total)
+                _apply_bandwidth_limit(started_at, done, bandwidth_limit_kbps)
         if preserve_timestamps:
             st = os.stat(src)
             os.utime(dst, (st.st_atime, st.st_mtime))
@@ -373,17 +413,27 @@ class SFTPFS:
         exclude_patterns: List[str],
         follow_symlinks: bool = False,
         progress_cb: Optional[Callable[[str], None]] = None,
+        cancel_cb: Optional[Callable[[], bool]] = None,
+        pause_cb: Optional[Callable[[], None]] = None,
     ) -> List[FileInfo]:
         import stat as stat_mod  # noqa: PLC0415
 
         files: List[FileInfo] = []
 
         def _walk(remote_dir: str, rel_base: str) -> None:
+            if pause_cb:
+                pause_cb()
+            if cancel_cb and cancel_cb():
+                raise SyncCancelled()
             try:
                 entries = self._sftp.listdir_attr(remote_dir)
             except Exception:
                 return
             for entry in entries:
+                if pause_cb:
+                    pause_cb()
+                if cancel_cb and cancel_cb():
+                    raise SyncCancelled()
                 rel = f"{rel_base}/{entry.filename}".lstrip("/")
                 abs_path = f"{remote_dir}/{entry.filename}"
                 is_dir = stat_mod.S_ISDIR(entry.st_mode)
@@ -426,13 +476,32 @@ class SFTPFS:
         remote: str,
         preserve_timestamps: bool = True,
         progress_cb: Optional[Callable[[int, int], None]] = None,
+        cancel_cb: Optional[Callable[[], bool]] = None,
+        pause_cb: Optional[Callable[[], None]] = None,
+        bandwidth_limit_kbps: int = 0,
     ) -> None:
         remote_dir = remote.rsplit("/", 1)[0]
         if remote_dir and remote_dir != ".":
             self._mkdir_p(remote_dir)
             if not remote_dir.endswith(":") and not self.exists(remote_dir):
                 raise FileNotFoundError(f"Remote directory does not exist: {remote_dir}")
-        self._sftp.put(local, remote, callback=progress_cb)
+        total = os.path.getsize(local)
+        done = 0
+        started_at = time.monotonic()
+        with open(local, "rb") as src_fh, self._sftp.open(remote, "wb") as dst_fh:
+            while True:
+                if pause_cb:
+                    pause_cb()
+                if cancel_cb and cancel_cb():
+                    raise SyncCancelled()
+                chunk = src_fh.read(1 << 20)
+                if not chunk:
+                    break
+                dst_fh.write(chunk)
+                done += len(chunk)
+                if progress_cb:
+                    progress_cb(done, total)
+                _apply_bandwidth_limit(started_at, done, bandwidth_limit_kbps)
         if preserve_timestamps:
             st = os.stat(local)
             self._sftp.utime(remote, (st.st_atime, st.st_mtime))
@@ -443,14 +512,33 @@ class SFTPFS:
         local: str,
         preserve_timestamps: bool = True,
         progress_cb: Optional[Callable[[int, int], None]] = None,
+        cancel_cb: Optional[Callable[[], bool]] = None,
+        pause_cb: Optional[Callable[[], None]] = None,
+        bandwidth_limit_kbps: int = 0,
     ) -> None:
         local_dir = os.path.dirname(local)
         if local_dir:
             os.makedirs(local_dir, exist_ok=True)
-        self._sftp.get(remote, local, callback=progress_cb)
+        attr = self._sftp.stat(remote)
+        total = attr.st_size or 0
+        done = 0
+        started_at = time.monotonic()
+        with self._sftp.open(remote, "rb") as src_fh, open(local, "wb") as dst_fh:
+            while True:
+                if pause_cb:
+                    pause_cb()
+                if cancel_cb and cancel_cb():
+                    raise SyncCancelled()
+                chunk = src_fh.read(1 << 20)
+                if not chunk:
+                    break
+                dst_fh.write(chunk)
+                done += len(chunk)
+                if progress_cb:
+                    progress_cb(done, total)
+                _apply_bandwidth_limit(started_at, done, bandwidth_limit_kbps)
         if preserve_timestamps:
             try:
-                attr = self._sftp.stat(remote)
                 if attr.st_mtime:
                     os.utime(local, (attr.st_atime or attr.st_mtime, attr.st_mtime))
             except Exception:
@@ -467,17 +555,25 @@ class SFTPFS:
 
     def _mkdir_p(self, path: str) -> None:
         parts = [p for p in path.split("/") if p]
-        current = "" if path.startswith("/") else "."
+        current = "/" if path.startswith("/") else "."
         if parts and len(parts[0]) == 2 and parts[0][1] == ":" and parts[0][0].isalpha():
             current = parts[0]
             parts = parts[1:]
 
         for part in parts:
-            current = f"{current}/{part}" if current else part
+            if current in ("", "."):
+                current = f"{current}/{part}" if current == "." else part
+            elif current == "/":
+                current = f"/{part}"
+            else:
+                current = f"{current}/{part}"
             try:
                 self._sftp.mkdir(current)
             except Exception:
                 pass
+
+    def makedirs(self, path: str) -> None:
+        self._mkdir_p(path)
 
 
 # ---------------------------------------------------------------------------
@@ -498,13 +594,18 @@ class SyncEngine:
         self._compare_only = compare_only
         self.status = SyncStatus.IDLE
         self._cancel = False
+        self._pause_gate = threading.Event()
+        self._pause_gate.set()
         self._thread: Optional[threading.Thread] = None
+        self._active_process: Optional[subprocess.Popen] = None
+        self._process_paused = False
 
     # ------------------------------------------------------------------
     def start(self, blocking: bool = False) -> None:
         if self.status in (SyncStatus.SCANNING, SyncStatus.SYNCING):
             return
         self._cancel = False
+        self._pause_gate.set()
         if blocking:
             self._run()
         else:
@@ -513,9 +614,51 @@ class SyncEngine:
 
     def cancel(self) -> None:
         self._cancel = True
+        self._pause_gate.set()
+        self._terminate_active_process()
+
+    def pause(self) -> None:
+        if self._active_process and self._active_process.poll() is None:
+            if os.name != "posix":
+                self._emit("warning", "Pause is not supported for rsync jobs on this platform.")
+                return
+            try:
+                os.killpg(self._active_process.pid, signal.SIGSTOP)
+                self._process_paused = True
+                self._emit("warning", f"{'Compare' if self._compare_only else 'Sync'} paused by user.")
+            except Exception as exc:
+                self._emit("warning", f"Could not pause rsync job: {exc}")
+            return
+        if self.is_running() and self._pause_gate.is_set():
+            self._pause_gate.clear()
+            self._emit("warning", f"{'Compare' if self._compare_only else 'Sync'} paused by user.")
+
+    def resume(self) -> None:
+        if self._active_process and self._active_process.poll() is None and self._process_paused:
+            if os.name != "posix":
+                return
+            try:
+                os.killpg(self._active_process.pid, signal.SIGCONT)
+                self._process_paused = False
+                self._emit("info", f"Resuming {'compare' if self._compare_only else 'sync'} …")
+            except Exception as exc:
+                self._emit("warning", f"Could not resume rsync job: {exc}")
+            return
+        if self.is_running() and not self._pause_gate.is_set():
+            self._pause_gate.set()
+            self._emit("info", f"Resuming {'compare' if self._compare_only else 'sync'} …")
+
+    def toggle_pause(self) -> None:
+        if self.is_paused():
+            self.resume()
+        else:
+            self.pause()
 
     def is_running(self) -> bool:
         return self.status in (SyncStatus.SCANNING, SyncStatus.SYNCING)
+
+    def is_paused(self) -> bool:
+        return self.is_running() and (not self._pause_gate.is_set() or self._process_paused)
 
     # ------------------------------------------------------------------
     def _emit(
@@ -535,6 +678,12 @@ class SyncEngine:
     def _safe_transfer(self, src_fs, src_abs: str, dst_fs, dst_abs: str, preserve_ts: bool, rel: str) -> None:
         try:
             self._transfer(src_fs, src_abs, dst_fs, dst_abs, preserve_ts)
+        except SyncCancelled:
+            try:
+                dst_fs.delete(dst_abs, False)
+            except Exception:
+                pass
+            raise
         except Exception as exc:
             errno = getattr(exc, "errno", None)
             if errno is None and getattr(exc, "args", None):
@@ -612,6 +761,11 @@ class SyncEngine:
                     self.profile.last_sync = datetime.now().isoformat()
                     self.profile.last_sync_status = "success"
 
+        except SyncCancelled:
+            self.status = SyncStatus.CANCELLED
+            self._emit("warning", f"{'Compare' if self._compare_only else 'Sync'} cancelled by user.")
+            if not self._compare_only:
+                self.profile.last_sync_status = "cancelled"
         except Exception as exc:
             self.status = SyncStatus.ERROR
             self._emit("error", f"{run_label} failed: {exc}")
@@ -637,6 +791,11 @@ class SyncEngine:
             if pat not in exclude_patterns:
                 exclude_patterns.append(pat)
 
+        if self._should_use_rsync(src_cfg, dst_cfg, opts):
+            self.status = SyncStatus.SYNCING
+            if self._run_rsync_transport(src_cfg, dst_cfg, include_patterns, exclude_patterns, opts):
+                return
+
         if self._compare_only:
             self._compare_only_run(src_fs, src_cfg, dst_fs, dst_cfg, include_patterns, exclude_patterns, opts)
             return
@@ -648,6 +807,8 @@ class SyncEngine:
             exclude_patterns,
             opts.follow_symlinks,
             progress_cb=lambda rel: self._emit("info", f"Scanning source: {rel}", rel),
+            cancel_cb=lambda: self._cancel,
+            pause_cb=self._wait_if_paused,
         )
         if self._cancel:
             return
@@ -660,6 +821,8 @@ class SyncEngine:
                 exclude_patterns,
                 opts.follow_symlinks,
                 progress_cb=lambda rel: self._emit("info", f"Scanning destination: {rel}", rel),
+                cancel_cb=lambda: self._cancel,
+                pause_cb=self._wait_if_paused,
             )
         except FileNotFoundError:
             dst_files = []
@@ -701,6 +864,8 @@ class SyncEngine:
             exclude_patterns,
             opts.follow_symlinks,
             progress_cb=lambda rel: self._emit("info", f"Scanning source: {rel}", rel),
+            cancel_cb=lambda: self._cancel,
+            pause_cb=self._wait_if_paused,
         )
         if self._cancel:
             return
@@ -713,6 +878,8 @@ class SyncEngine:
                 exclude_patterns,
                 opts.follow_symlinks,
                 progress_cb=lambda rel: self._emit("info", f"Scanning destination: {rel}", rel),
+                cancel_cb=lambda: self._cancel,
+                pause_cb=self._wait_if_paused,
             )
         except FileNotFoundError:
             dst_files = []
@@ -799,6 +966,7 @@ class SyncEngine:
         done = 0
 
         self._emit("info", f"Found {total} file(s) in source.")
+        self._ensure_destination_dirs(src_map, dst_fs, dst_cfg)
 
         for rel, src_f in file_entries:
             if self._cancel:
@@ -838,6 +1006,7 @@ class SyncEngine:
         self._emit("info", f"Found {total} file(s) across both sides.")
         if opts.delete_extra:
             self._emit("warning", "Ignoring delete-extra option in two-way mode.")
+        self._ensure_destination_dirs(src_map, dst_fs, dst_cfg)
 
         for rel in file_paths:
             if self._cancel:
@@ -909,14 +1078,159 @@ class SyncEngine:
 
         return "src_to_dst", compare_reason
 
+    def _wait_if_paused(self) -> None:
+        while not self._pause_gate.is_set():
+            if self._cancel:
+                raise SyncCancelled()
+            time.sleep(0.1)
+
+    def _ensure_destination_dirs(self, src_map, dst_fs, dst_cfg) -> None:
+        dir_entries = sorted(
+            (rel for rel, file_info in src_map.items() if file_info.is_dir),
+            key=lambda rel: rel.count("/"),
+        )
+        for rel in dir_entries:
+            if self._cancel:
+                raise SyncCancelled()
+            dst_dir = self._join(dst_cfg, rel)
+            try:
+                if hasattr(dst_fs, "makedirs"):
+                    dst_fs.makedirs(dst_dir)
+                elif isinstance(dst_fs, LocalFS):
+                    LocalFS.makedirs(dst_dir)
+            except Exception as exc:
+                self._emit("error", f"Could not create destination folder [{rel}]: {exc}", rel)
+
+    def _terminate_active_process(self) -> None:
+        proc = self._active_process
+        if proc is None or proc.poll() is not None:
+            return
+        try:
+            if os.name == "posix":
+                os.killpg(proc.pid, signal.SIGTERM)
+            else:
+                proc.terminate()
+        except Exception:
+            pass
+
+    def _should_use_rsync(self, src_cfg, dst_cfg, opts) -> bool:
+        return (
+            opts.use_rsync_ssh
+            and opts.mode in ("one_way", "mirror")
+            and not self._compare_only
+            and ((src_cfg.type == "local" and dst_cfg.type == "sftp") or (src_cfg.type == "sftp" and dst_cfg.type == "local"))
+        )
+
+    def _run_rsync_transport(self, src_cfg, dst_cfg, include_patterns, exclude_patterns, opts) -> bool:
+        if not shutil.which("rsync") or not shutil.which("ssh"):
+            self._emit("warning", "rsync over SSH is enabled, but rsync or ssh is not installed locally. Falling back to built-in transfer.")
+            return False
+
+        remote_cfg = dst_cfg if dst_cfg.type == "sftp" else src_cfg
+        if remote_cfg.password and not remote_cfg.key_file and not shutil.which("sshpass"):
+            self._emit("warning", "rsync over SSH needs sshpass for password-only profiles. Falling back to built-in transfer.")
+            return False
+
+        cmd = self._build_rsync_command(src_cfg, dst_cfg, include_patterns, exclude_patterns, opts)
+        self._emit("info", "Using rsync over SSH for this sync.")
+        self._emit("info", f"rsync destination: {dst_cfg.path if dst_cfg.type == 'sftp' else src_cfg.path}")
+
+        creationflags = 0
+        start_new_session = os.name == "posix"
+        self._process_paused = False
+        try:
+            self._active_process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                start_new_session=start_new_session,
+                creationflags=creationflags,
+            )
+
+            assert self._active_process.stdout is not None
+            for raw_line in self._active_process.stdout:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                if line.startswith("*deleting "):
+                    rel = line[len("*deleting "):].strip()
+                    self._emit("delete", f"Deleting {rel}", rel)
+                elif line[:2] in {">f", "cd", "cL", "hL"}:
+                    parts = line.split(maxsplit=1)
+                    rel = parts[1].strip() if len(parts) > 1 else ""
+                    self._emit("copy", f"Copying {rel} via rsync", rel)
+                else:
+                    self._emit("info", f"rsync: {line}")
+
+            exit_code = self._active_process.wait()
+            if self._cancel:
+                raise SyncCancelled()
+            if exit_code != 0:
+                raise RuntimeError(f"rsync exited with code {exit_code}")
+            return True
+        finally:
+            self._active_process = None
+            self._process_paused = False
+
+    def _build_rsync_command(self, src_cfg, dst_cfg, include_patterns, exclude_patterns, opts) -> List[str]:
+        remote_cfg = dst_cfg if dst_cfg.type == "sftp" else src_cfg
+        local_cfg = src_cfg if src_cfg.type == "local" else dst_cfg
+
+        ssh_cmd = ["ssh", "-p", str(remote_cfg.port), "-o", "StrictHostKeyChecking=accept-new"]
+        if remote_cfg.key_file:
+            ssh_cmd.extend(["-i", os.path.expanduser(remote_cfg.key_file)])
+        elif not remote_cfg.password:
+            ssh_cmd.extend(["-o", "BatchMode=yes"])
+
+        cmd: List[str] = []
+        if remote_cfg.password and not remote_cfg.key_file:
+            cmd.extend(["sshpass", "-p", remote_cfg.password])
+
+        cmd.extend(["rsync", "-r", "--itemize-changes", "--human-readable"])
+        if opts.preserve_timestamps:
+            cmd.append("-t")
+        if opts.follow_symlinks:
+            cmd.append("-L")
+        else:
+            cmd.append("--no-links")
+        if opts.verify_checksums:
+            cmd.append("-c")
+        if opts.mode == "mirror" or opts.delete_extra:
+            cmd.append("--delete")
+        if opts.bandwidth_limit_kbps > 0:
+            cmd.extend(["--bwlimit", str(opts.bandwidth_limit_kbps)])
+
+        for pat in exclude_patterns:
+            cmd.extend(["--exclude", pat])
+        if include_patterns:
+            cmd.extend(["--include", "*/"])
+            for pat in include_patterns:
+                cmd.extend(["--include", pat])
+            cmd.extend(["--exclude", "*"])
+
+        cmd.extend(["-e", shlex.join(ssh_cmd)])
+
+        remote_path = remote_cfg.path.rstrip("/") + "/"
+        remote_spec = f"{remote_cfg.username}@{remote_cfg.host}:{shlex.quote(remote_path)}"
+        local_path = os.path.abspath(local_cfg.path).rstrip(os.sep) + os.sep
+
+        if src_cfg.type == "local":
+            cmd.extend([local_path, remote_spec])
+        else:
+            os.makedirs(local_cfg.path, exist_ok=True)
+            cmd.extend([remote_spec, local_path])
+        return cmd
+
     @staticmethod
     def _join(cfg, rel: str) -> str:
         if cfg.type == "sftp":
             return f"{cfg.path.rstrip('/')}/{rel}"
         return os.path.join(cfg.path, rel.replace("/", os.sep))
 
-    @staticmethod
     def _transfer(
+        self,
         src_fs,
         src_abs: str,
         dst_fs,
@@ -924,21 +1238,55 @@ class SyncEngine:
         preserve_ts: bool,
     ) -> None:
         if isinstance(src_fs, LocalFS) and isinstance(dst_fs, LocalFS):
-            LocalFS.copy_file(src_abs, dst_abs, preserve_ts)
+            LocalFS.copy_file(
+                src_abs,
+                dst_abs,
+                preserve_ts,
+                cancel_cb=lambda: self._cancel,
+                pause_cb=self._wait_if_paused,
+                bandwidth_limit_kbps=self.profile.options.bandwidth_limit_kbps,
+            )
 
         elif isinstance(src_fs, LocalFS) and isinstance(dst_fs, SFTPFS):
-            dst_fs.upload(src_abs, dst_abs, preserve_ts)
+            dst_fs.upload(
+                src_abs,
+                dst_abs,
+                preserve_ts,
+                cancel_cb=lambda: self._cancel,
+                pause_cb=self._wait_if_paused,
+                bandwidth_limit_kbps=self.profile.options.bandwidth_limit_kbps,
+            )
 
         elif isinstance(src_fs, SFTPFS) and isinstance(dst_fs, LocalFS):
-            src_fs.download(src_abs, dst_abs, preserve_ts)
+            src_fs.download(
+                src_abs,
+                dst_abs,
+                preserve_ts,
+                cancel_cb=lambda: self._cancel,
+                pause_cb=self._wait_if_paused,
+                bandwidth_limit_kbps=self.profile.options.bandwidth_limit_kbps,
+            )
 
         elif isinstance(src_fs, SFTPFS) and isinstance(dst_fs, SFTPFS):
             # SFTP → SFTP via temp file
             with tempfile.NamedTemporaryFile(delete=False, suffix=".queeksync_tmp") as tf:
                 tmp = tf.name
             try:
-                src_fs.download(src_abs, tmp)
-                dst_fs.upload(tmp, dst_abs, preserve_ts)
+                src_fs.download(
+                    src_abs,
+                    tmp,
+                    cancel_cb=lambda: self._cancel,
+                    pause_cb=self._wait_if_paused,
+                    bandwidth_limit_kbps=self.profile.options.bandwidth_limit_kbps,
+                )
+                dst_fs.upload(
+                    tmp,
+                    dst_abs,
+                    preserve_ts,
+                    cancel_cb=lambda: self._cancel,
+                    pause_cb=self._wait_if_paused,
+                    bandwidth_limit_kbps=self.profile.options.bandwidth_limit_kbps,
+                )
             finally:
                 try:
                     os.unlink(tmp)

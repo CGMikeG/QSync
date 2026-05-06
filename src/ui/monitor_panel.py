@@ -57,6 +57,15 @@ class ActiveSyncCard(GlassCard):
         )
         self._cancel_btn.pack(side="right", padx=T.PAD_SM)
 
+        self._pause_btn = ctk.CTkButton(
+            hdr, text="Pause", width=70, height=26,
+            corner_radius=T.RADIUS_SM, fg_color="transparent",
+            hover_color=T.BG_HOVER, text_color=T.TEXT_MUTED,
+            border_color=T.BORDER, border_width=1,
+            command=self._toggle_pause,
+        )
+        self._pause_btn.pack(side="right")
+
         # Progress bar
         self._progress = ctk.CTkProgressBar(
             self,
@@ -85,6 +94,7 @@ class ActiveSyncCard(GlassCard):
             self._done = True
             self._progress.stop()
             self._cancel_btn.configure(state="disabled")
+            self._pause_btn.configure(state="disabled")
             if event.kind == "success":
                 self._progress.configure(progress_color=T.SUCCESS, mode="determinate")
                 self._progress.set(1.0)
@@ -103,6 +113,10 @@ class ActiveSyncCard(GlassCard):
             self._progress.configure(mode="determinate")
             self._progress.set(event.progress)
 
+        engine = self._app.get_engine(self._pid)
+        paused = bool(engine and engine.is_paused())
+        self._pause_btn.configure(text="Resume" if paused else "Pause")
+
         status_text = {
             "info": "Working…",
             "compare": "Comparing…",
@@ -111,6 +125,9 @@ class ActiveSyncCard(GlassCard):
             "skip": "Up-to-date",
         }.get(event.kind, "Running…")
         status_color = T.WARNING if event.kind == "delete" else T.ACCENT
+        if paused:
+            status_text = "Paused"
+            status_color = T.WARNING
         if event.progress > 0:
             status_text = f"{status_text} {event.progress*100:.0f}%"
         self._status_lbl.configure(text=status_text, text_color=status_color)
@@ -118,6 +135,9 @@ class ActiveSyncCard(GlassCard):
 
     def _cancel(self) -> None:
         self._app.cancel_sync(self._pid)
+
+    def _toggle_pause(self) -> None:
+        self._app.toggle_pause_sync(self._pid)
 
 
 # ---------------------------------------------------------------------------

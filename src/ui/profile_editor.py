@@ -5,6 +5,7 @@ Profile editor dialog – tabbed form for creating / editing a sync profile.
 from __future__ import annotations
 
 import os
+import time
 from tkinter import filedialog, messagebox
 from typing import Callable, List, Optional
 
@@ -272,6 +273,38 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             text="Open a folder picker for the local path field. Example: use this to avoid mistyping home folders or mounted drive paths."
         )
 
+        local_test_label = ctk.CTkLabel(local_frame, text="", font=ctk.CTkFont(size=11), text_color=T.TEXT_MUTED)
+        local_test_label.grid(row=1, column=0, sticky="w", pady=(T.PAD_XS, 0))
+
+        local_test_btn = ctk.CTkButton(
+            local_frame, text="Test Folder Access", width=150, height=30,
+            corner_radius=T.RADIUS_SM, fg_color="transparent",
+            hover_color=T.BG_HOVER, text_color=T.ACCENT,
+            border_color=T.ACCENT, border_width=1,
+            command=lambda lbl=local_test_label, entry=path_entry_holder, src=is_source: self._test_local_path(entry, lbl, src),
+        )
+        local_test_btn.grid(row=1, column=1, sticky="e", padx=(T.PAD_SM, 0), pady=(T.PAD_XS, 0))
+        attach_tooltip(
+            local_test_btn,
+            text="Check that this local folder exists and is accessible. Example: for a destination folder, QueekSync also writes and removes a tiny probe file to confirm it can really save files there."
+        )
+
+        local_dir_test_label = ctk.CTkLabel(local_frame, text="", font=ctk.CTkFont(size=11), text_color=T.TEXT_MUTED)
+        local_dir_test_btn = ctk.CTkButton(
+            local_frame, text="Create Test Folder", width=150, height=30,
+            corner_radius=T.RADIUS_SM, fg_color="transparent",
+            hover_color=T.BG_HOVER, text_color=T.ACCENT,
+            border_color=T.ACCENT, border_width=1,
+            command=lambda lbl=local_dir_test_label, entry=path_entry_holder: self._create_local_test_folder(entry, lbl),
+        )
+        if not is_source:
+            local_dir_test_label.grid(row=2, column=0, sticky="w", pady=(T.PAD_XS, 0))
+            local_dir_test_btn.grid(row=2, column=1, sticky="e", padx=(T.PAD_SM, 0), pady=(T.PAD_XS, 0))
+            attach_tooltip(
+                local_dir_test_btn,
+                text="Create a real testconnection folder inside the destination path. Example: use this to confirm QueekSync can make new folders before running a sync."
+            )
+
         # SFTP fields
         sftp_frame = ctk.CTkFrame(frm, fg_color="transparent")
         sftp_frame.grid(row=3, column=0, columnspan=2, sticky="ew")
@@ -365,6 +398,42 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             test_btn,
             text="Check that the host, port, username, password, and key settings work. Example: click this before saving to catch a wrong hostname or SSH key path early."
         )
+
+        access_label = ctk.CTkLabel(sftp_frame, text="", font=ctk.CTkFont(size=11), text_color=T.TEXT_MUTED)
+        access_label.grid(row=5, column=1, sticky="w")
+
+        access_btn = ctk.CTkButton(
+            sftp_frame, text="⟳  Test Folder Access", width=180, height=30,
+            corner_radius=T.RADIUS_SM, fg_color="transparent",
+            hover_color=T.BG_HOVER, text_color=T.ACCENT,
+            border_color=T.ACCENT, border_width=1,
+            command=lambda lbl=access_label, src=is_source: self._test_sftp_path_access(
+                host_entry, port_entry, user_entry, pass_entry, key_entry, sftp_path_entry, lbl, src
+            ),
+        )
+        access_btn.grid(row=5, column=0, sticky="w", pady=(0, T.PAD_SM))
+        attach_tooltip(
+            access_btn,
+            text="Check that the remote folder exists and is usable. Example: for a destination folder, QueekSync uploads and deletes a tiny test file to confirm write access before you run a full sync."
+        )
+
+        create_dir_label = ctk.CTkLabel(sftp_frame, text="", font=ctk.CTkFont(size=11), text_color=T.TEXT_MUTED)
+        create_dir_btn = ctk.CTkButton(
+            sftp_frame, text="⟳  Create Test Folder", width=180, height=30,
+            corner_radius=T.RADIUS_SM, fg_color="transparent",
+            hover_color=T.BG_HOVER, text_color=T.ACCENT,
+            border_color=T.ACCENT, border_width=1,
+            command=lambda lbl=create_dir_label: self._create_sftp_test_folder(
+                host_entry, port_entry, user_entry, pass_entry, key_entry, sftp_path_entry, lbl
+            ),
+        )
+        if not is_source:
+            create_dir_label.grid(row=6, column=1, sticky="w")
+            create_dir_btn.grid(row=6, column=0, sticky="w", pady=(0, T.PAD_SM))
+            attach_tooltip(
+                create_dir_btn,
+                text="Create a real testconnection folder inside the destination path. Example: use this to confirm the server lets QueekSync create nested folders before starting a sync."
+            )
 
         # Show/hide frames based on type
         def _update_type(*_):
@@ -484,6 +553,189 @@ class ProfileEditorDialog(ctk.CTkToplevel):
 
         threading.Thread(target=_try, daemon=True).start()
 
+    def _test_local_path(self, entry: LabelledEntry, label, is_source: bool) -> None:
+        path = os.path.expanduser(entry.get().strip())
+        role = "Source" if is_source else "Destination"
+        if not path:
+            label.configure(text=f"✖ {role} path is empty", text_color=T.ERROR)
+            return
+        if not os.path.exists(path):
+            label.configure(text=f"✖ {role} folder not found", text_color=T.ERROR)
+            return
+        if not os.path.isdir(path):
+            label.configure(text=f"✖ {role} path is not a folder", text_color=T.ERROR)
+            return
+
+        try:
+            if is_source:
+                if not os.access(path, os.R_OK | os.X_OK):
+                    raise PermissionError("folder is not readable")
+                os.listdir(path)
+                label.configure(text="✔ Source folder exists and is readable", text_color=T.SUCCESS)
+                return
+
+            if not os.access(path, os.W_OK | os.X_OK):
+                raise PermissionError("folder is not writable")
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            probe_name = f"foldertest-{stamp}.txt"
+            probe_path = os.path.join(path, probe_name)
+            with open(probe_path, "w", encoding="utf-8") as fh:
+                fh.write(f"QueekSync folder access test\nCreated: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            label.configure(text=f"✔ Destination folder exists and created {probe_name}", text_color=T.SUCCESS)
+        except Exception as exc:
+            label.configure(text=f"✖ {str(exc)[:80]}", text_color=T.ERROR)
+
+    def _create_local_test_folder(self, entry: LabelledEntry, label) -> None:
+        path = os.path.expanduser(entry.get().strip())
+        if not path:
+            label.configure(text="✖ Destination path is empty", text_color=T.ERROR)
+            return
+        if not os.path.isdir(path):
+            label.configure(text="✖ Destination folder not found", text_color=T.ERROR)
+            return
+        try:
+            test_dir = os.path.join(path, "testconnection")
+            os.makedirs(test_dir, exist_ok=True)
+            label.configure(text="✔ Created destination folder testconnection", text_color=T.SUCCESS)
+        except Exception as exc:
+            label.configure(text=f"✖ {str(exc)[:80]}", text_color=T.ERROR)
+
+    def _test_sftp_path_access(self, host, port, user, pw, key, path_entry, label, is_source: bool) -> None:
+        import threading
+
+        host_val = host.get().strip()
+        try:
+            port_val = int(port.get() or 22)
+        except ValueError:
+            port_val = 22
+        user_val = user.get().strip()
+        pw_val = pw.get()
+        key_val = key.get().strip()
+        path_val = path_entry.get().strip()
+        role = "source" if is_source else "destination"
+
+        if not host_val or not user_val or not path_val:
+            label.configure(text=f"✖ Fill in host, username, and remote path first", text_color=T.ERROR)
+            return
+
+        label.configure(text=f"Testing {role} folder…", text_color=T.TEXT_MUTED)
+
+        def _try():
+            client = None
+            sftp = None
+            try:
+                import paramiko  # type: ignore[import]
+
+                client = paramiko.SSHClient()
+                client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                client.connect(
+                    hostname=host_val,
+                    port=port_val,
+                    username=user_val,
+                    password=pw_val or None,
+                    key_filename=os.path.expanduser(key_val) if key_val else None,
+                    timeout=8,
+                )
+                sftp = client.open_sftp()
+                info = sftp.stat(path_val)
+                import stat as stat_mod
+                if not stat_mod.S_ISDIR(info.st_mode):
+                    raise NotADirectoryError(f"{path_val} is not a folder")
+
+                if is_source:
+                    sftp.listdir(path_val)
+                    self.after(0, lambda: label.configure(text="✔ Source folder exists and is readable", text_color=T.SUCCESS))
+                    return
+
+                stamp = time.strftime("%Y%m%d-%H%M%S")
+                probe_name = f"foldertest-{stamp}.txt"
+                probe_path = f"{path_val.rstrip('/')}/{probe_name}"
+                with sftp.open(probe_path, "w") as fh:
+                    fh.write(f"QueekSync folder access test\nCreated: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                self.after(0, lambda name=probe_name: label.configure(text=f"✔ Destination folder exists and uploaded {name}", text_color=T.SUCCESS))
+            except Exception as exc:
+                msg = str(exc).replace("\n", " ")[:90]
+                self.after(0, lambda m=msg: label.configure(text=f"✖ {m}", text_color=T.ERROR))
+            finally:
+                try:
+                    if sftp:
+                        sftp.close()
+                except Exception:
+                    pass
+                try:
+                    if client:
+                        client.close()
+                except Exception:
+                    pass
+
+        threading.Thread(target=_try, daemon=True).start()
+
+    def _create_sftp_test_folder(self, host, port, user, pw, key, path_entry, label) -> None:
+        import threading
+
+        host_val = host.get().strip()
+        try:
+            port_val = int(port.get() or 22)
+        except ValueError:
+            port_val = 22
+        user_val = user.get().strip()
+        pw_val = pw.get()
+        key_val = key.get().strip()
+        path_val = path_entry.get().strip()
+
+        if not host_val or not user_val or not path_val:
+            label.configure(text="✖ Fill in host, username, and remote path first", text_color=T.ERROR)
+            return
+
+        label.configure(text="Creating destination test folder…", text_color=T.TEXT_MUTED)
+
+        def _try():
+            client = None
+            sftp = None
+            try:
+                import paramiko  # type: ignore[import]
+
+                client = paramiko.SSHClient()
+                client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                client.connect(
+                    hostname=host_val,
+                    port=port_val,
+                    username=user_val,
+                    password=pw_val or None,
+                    key_filename=os.path.expanduser(key_val) if key_val else None,
+                    timeout=8,
+                )
+                sftp = client.open_sftp()
+                import stat as stat_mod
+                info = sftp.stat(path_val)
+                if not stat_mod.S_ISDIR(info.st_mode):
+                    raise NotADirectoryError(f"{path_val} is not a folder")
+
+                test_dir = f"{path_val.rstrip('/')}/testconnection"
+                try:
+                    existing = sftp.stat(test_dir)
+                    if not stat_mod.S_ISDIR(existing.st_mode):
+                        raise NotADirectoryError(f"{test_dir} exists but is not a folder")
+                except FileNotFoundError:
+                    sftp.mkdir(test_dir)
+                self.after(0, lambda: label.configure(text="✔ Created destination folder testconnection", text_color=T.SUCCESS))
+            except Exception as exc:
+                msg = str(exc).replace("\n", " ")[:90]
+                self.after(0, lambda m=msg: label.configure(text=f"✖ {m}", text_color=T.ERROR))
+            finally:
+                try:
+                    if sftp:
+                        sftp.close()
+                except Exception:
+                    pass
+                try:
+                    if client:
+                        client.close()
+                except Exception:
+                    pass
+
+        threading.Thread(target=_try, daemon=True).start()
+
     # ==================================================================
     # Tab: Options
     # ==================================================================
@@ -538,6 +790,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
             ("_opt_ts",        "Preserve file timestamps",           opts.preserve_timestamps),
             ("_opt_symlinks",  "Follow symbolic links",              opts.follow_symlinks),
             ("_opt_checksum",  "Verify file checksums (slower)",     opts.verify_checksums),
+            ("_opt_rsync",     "Use rsync over SSH when available",  opts.use_rsync_ssh),
         ]
         for attr, label, default in bool_opts:
             var = ctk.BooleanVar(value=default)
@@ -555,6 +808,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
                 "_opt_ts": "Keep original modification times after copying. Example: enable this when photo dates or build timestamps matter.",
                 "_opt_symlinks": "Follow symbolic links and sync the files they point to. Example: turn this on only if your source folder contains useful linked directories.",
                 "_opt_checksum": "Compare file contents using checksums instead of faster metadata checks. Example: use this for critical backups when you want higher confidence and can accept slower runs.",
+                "_opt_rsync": "Prefer rsync over SSH for one-way or mirror local-to-remote syncs. Example: enable this for Linux or WSL targets when rsync is installed on both sides and you want faster changed-file transfers.",
             }
             attach_tooltip(box, text=tip_text[attr])
 
@@ -807,6 +1061,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         p.options.preserve_timestamps = self._opt_ts.get()
         p.options.follow_symlinks = self._opt_symlinks.get()
         p.options.verify_checksums = self._opt_checksum.get()
+        p.options.use_rsync_ssh = self._opt_rsync.get()
         try:
             p.options.bandwidth_limit_kbps = max(0, int(self._bw_entry.get() or 0))
         except ValueError:
