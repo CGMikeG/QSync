@@ -427,7 +427,11 @@ class SFTPFS:
         preserve_timestamps: bool = True,
         progress_cb: Optional[Callable[[int, int], None]] = None,
     ) -> None:
-        self._mkdir_p(remote.rsplit("/", 1)[0])
+        remote_dir = remote.rsplit("/", 1)[0]
+        if remote_dir and remote_dir != ".":
+            self._mkdir_p(remote_dir)
+            if not remote_dir.endswith(":") and not self.exists(remote_dir):
+                raise FileNotFoundError(f"Remote directory does not exist: {remote_dir}")
         self._sftp.put(local, remote, callback=progress_cb)
         if preserve_timestamps:
             st = os.stat(local)
@@ -464,14 +468,16 @@ class SFTPFS:
     def _mkdir_p(self, path: str) -> None:
         parts = [p for p in path.split("/") if p]
         current = "" if path.startswith("/") else "."
-        if path.startswith("/"):
-            current = ""
+        if parts and len(parts[0]) == 2 and parts[0][1] == ":" and parts[0][0].isalpha():
+            current = parts[0]
+            parts = parts[1:]
+
         for part in parts:
             current = f"{current}/{part}" if current else part
             try:
                 self._sftp.mkdir(current)
             except Exception:
-                pass  # already exists or no permission – try anyway
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -548,6 +554,17 @@ class SyncEngine:
                 if not src_exists:
                     self._emit("skip", f"Skipping {rel} (source missing)", rel)
                     return
+
+                dst_dir = ""
+                if isinstance(dst_abs, str) and "/" in dst_abs:
+                    dst_dir = dst_abs.rsplit("/", 1)[0]
+                if dst_dir and hasattr(dst_fs, "exists"):
+                    try:
+                        if not dst_dir.endswith(":") and not dst_fs.exists(dst_dir):
+                            self._emit("error", f"Copy failed [{rel}]: destination folder missing or not accessible: {dst_dir}", rel)
+                            return
+                    except Exception:
+                        pass
 
                 self._emit("error", f"Copy failed [{rel}]: {exc}", rel)
                 return
