@@ -22,10 +22,7 @@ class ProfileCard(GlassCard):
 
     def __init__(self, master, profile, app: "QueekSyncApp", **kw) -> None:
         kw.setdefault("width", 300)
-        kw.setdefault("height", 224)
         super().__init__(master, **kw)
-        self.grid_propagate(False)
-        self.pack_propagate(False)
 
         self._profile = profile
         self._app = app
@@ -35,8 +32,6 @@ class ProfileCard(GlassCard):
         p = self._profile
         pad = 18
         vertical_pad = 14
-        card_width = int(self.cget("width"))
-        card_height = int(self.cget("height"))
 
         # ── Colour accent bar (left edge, fixed 4 px wide) ─────────────
         ctk.CTkFrame(
@@ -50,12 +45,10 @@ class ProfileCard(GlassCard):
         content = ctk.CTkFrame(
             self,
             fg_color="transparent",
-            width=card_width - (pad * 2),
-            height=card_height - (vertical_pad * 2),
         )
-        content.place(x=pad, y=vertical_pad)
+        content.grid(row=0, column=0, sticky="nsew", padx=pad, pady=vertical_pad)
+        self.grid_columnconfigure(0, weight=1)
         content.grid_columnconfigure(0, weight=1)
-        content.grid_rowconfigure(3, weight=1)  # spacer before buttons
 
         # Name + status row
         top = ctk.CTkFrame(content, fg_color="transparent")
@@ -130,7 +123,7 @@ class ProfileCard(GlassCard):
 
         # Buttons
         btn_frame = ctk.CTkFrame(content, fg_color="transparent")
-        btn_frame.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+        btn_frame.grid(row=3, column=0, sticky="ew", pady=(10, 0))
         btn_frame.grid_columnconfigure(0, weight=1)
 
         sync_btn = PrimaryButton(
