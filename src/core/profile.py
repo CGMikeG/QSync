@@ -117,7 +117,15 @@ class FilterConfig:
 
     include_patterns: List[str] = field(default_factory=list)
     exclude_patterns: List[str] = field(
-        default_factory=lambda: ["*.tmp", "*.log", ".DS_Store", "Thumbs.db", "__pycache__", ".venv"]
+        default_factory=lambda: [
+            "*.tmp",
+            "*.log",
+            ".DS_Store",
+            "Thumbs.db",
+            "__pycache__",
+            ".venv*",
+            "*:Zone.Identifier",
+        ]
     )
 
     def to_dict(self) -> dict:

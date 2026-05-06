@@ -575,15 +575,21 @@ class SyncEngine:
         opts = self.profile.options
         flt = self.profile.filters
 
+        include_patterns = list(flt.include_patterns)
+        exclude_patterns = list(flt.exclude_patterns)
+        for pat in (".venv*", "*:Zone.Identifier"):
+            if pat not in exclude_patterns:
+                exclude_patterns.append(pat)
+
         if self._compare_only:
-            self._compare_only_run(src_fs, src_cfg, dst_fs, dst_cfg, flt.include_patterns, flt.exclude_patterns, opts)
+            self._compare_only_run(src_fs, src_cfg, dst_fs, dst_cfg, include_patterns, exclude_patterns, opts)
             return
 
         self._emit("info", "Scanning source …")
         src_files = src_fs.scan(
             src_cfg.path,
-            flt.include_patterns,
-            flt.exclude_patterns,
+            include_patterns,
+            exclude_patterns,
             opts.follow_symlinks,
             progress_cb=lambda rel: self._emit("info", f"Scanning source: {rel}", rel),
         )
@@ -594,8 +600,8 @@ class SyncEngine:
         try:
             dst_files = dst_fs.scan(
                 dst_cfg.path,
-                [],
-                [],
+                include_patterns,
+                exclude_patterns,
                 opts.follow_symlinks,
                 progress_cb=lambda rel: self._emit("info", f"Scanning destination: {rel}", rel),
             )

@@ -749,7 +749,7 @@ class ProfileEditorDialog(ctk.CTkToplevel):
         attach_tooltip(
             exclude_label,
             self._exclude_box,
-            text="Files or folders matching these patterns will be skipped. Example: add .venv, .git, node_modules, or *.tmp to avoid syncing virtual environments, repository metadata, and generated files."
+            text="Files or folders matching these patterns will be skipped. Example: add .venv*, .git, node_modules, or *.tmp to avoid syncing virtual environments, repository metadata, and generated files. On Windows/WSL you can also exclude *:Zone.Identifier to ignore Windows download metadata streams."
         )
 
         filter_hint = ctk.CTkLabel(
